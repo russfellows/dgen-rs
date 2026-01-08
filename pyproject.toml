@@ -27,4 +27,3 @@ features = ["python-bindings"]
 module-name = "dgen_py._dgen_rs"  # Put the .so inside the dgen_py package
 python-source = "python"
 python-packages = ["dgen_py"]
-features = ["python-bindings"]  # Enable PyO3 features

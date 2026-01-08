@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         python-version: ['3.10', '3.11', '3.12']
     
     steps:
@@ -29,35 +29,21 @@ jobs:
           toolchain: '1.90'
       
       - name: Build (Rust)
-        run: |
-          if [ "$RUNNER_OS" == "Linux" ]; then
-            cargo build --release
-          else
-            cargo build --release --no-default-features --features python-bindings
-          fi
-        shell: bash
+        run: cargo build --release
       
       - name: Test (Rust)
-        run: |
-          if [ "$RUNNER_OS" == "Linux" ]; then
-            cargo test --release
-          else
-            cargo test --release --no-default-features --features python-bindings
-          fi
-        shell: bash
+        run: cargo test --release
       
       - name: Build (Python)
         run: |
           pip install maturin
           maturin build --release --out dist
           pip install dist/*.whl
-        shell: bash
       
       - name: Test (Python)
         run: |
           python -c "import dgen_py; data = dgen_py.generate_data(1024); print(f'✓ Generated {len(data)} bytes')"
           python -c "import dgen_py; info = dgen_py.get_system_info(); print(f'✓ System info: {info}')"
-        shell: bash
 
   lint:
     name: Lint

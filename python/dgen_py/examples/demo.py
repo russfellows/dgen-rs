@@ -46,11 +46,11 @@ def test_streaming():
 
     print(f"\nGenerating {size / (1024**3):.1f} GiB using streaming API...")
     
-    gen = dgen_py.Generator(
+    gen = dgen_py.StreamingGenerator(
         size=size,
         dedup_ratio=2.0,
         compress_ratio=2.0,
-        numa_aware=True
+        numa_mode='force'
     )
     
     buf = bytearray(chunk_size)

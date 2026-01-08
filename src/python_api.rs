@@ -176,7 +176,7 @@ fn generate_buffer(
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
-    let data = py.allow_threads(|| generate_data(config));
+    let data = py.detach(|| generate_data(config));
 
     // Convert Vec<u8> to Bytes (cheap, just wraps the Vec's heap allocation)
     let bytes = Bytes::from(data);
@@ -213,7 +213,7 @@ fn generate_buffer(
 #[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None))]
 fn generate_into_buffer(
     py: Python<'_>,
-    buffer: PyObject,
+    buffer: Py<PyAny>,
     dedup_ratio: f64,
     compress_ratio: f64,
     numa_mode: &str,
@@ -364,7 +364,7 @@ impl PyGenerator {
     ///
     /// # Returns
     /// Number of bytes written (0 when complete)
-    fn fill_chunk(&mut self, py: Python<'_>, buffer: PyObject) -> PyResult<usize> {
+    fn fill_chunk(&mut self, py: Python<'_>, buffer: Py<PyAny>) -> PyResult<usize> {
         // Get buffer via PyBuffer protocol
         let buf: PyBuffer<u8> = PyBuffer::get(buffer.bind(py))?;
 
@@ -453,7 +453,7 @@ impl PyGenerator {
 
 #[cfg(feature = "numa")]
 #[pyfunction]
-fn get_numa_info(py: Python<'_>) -> PyResult<PyObject> {
+fn get_numa_info(py: Python<'_>) -> PyResult<Py<PyAny>> {
     use pyo3::types::PyDict;
 
     let topology = NumaTopology::detect()

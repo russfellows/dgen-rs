@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build script for Python bindings
+# Build script for Python wheel
 
 set -e  # Exit on error
 
-echo "Building dgen-py Python package..."
+echo "Building dgen-py Python wheel..."
 
 # Check if maturin is installed
 if ! command -v maturin &> /dev/null; then
@@ -11,11 +11,22 @@ if ! command -v maturin &> /dev/null; then
     exit 1
 fi
 
-# Build in release mode
-echo "Building with maturin..."
-maturin develop --release --features python-bindings
+# Create wheels directory
+WHEEL_DIR="./target/wheels"
+mkdir -p "$WHEEL_DIR"
 
-echo "Build complete!"
+# Build wheel in release mode
+echo "Building wheel with maturin (release mode)..."
+maturin build --release --out "$WHEEL_DIR"
+
 echo ""
-echo "Test with:"
-echo "  python -c 'import dgen_py; print(dgen_py.generate_data(1024))'"
+echo "✓ Build complete!"
+echo ""
+echo "Wheel saved to: $WHEEL_DIR"
+ls -lh "$WHEEL_DIR"/*.whl 2>/dev/null || echo "No wheels found"
+echo ""
+echo "To install locally:"
+echo "  pip install $WHEEL_DIR/*.whl --force-reinstall"
+echo ""
+echo "To install in development mode instead:"
+echo "  maturin develop --release"

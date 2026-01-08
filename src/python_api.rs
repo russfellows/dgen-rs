@@ -4,11 +4,11 @@
 
 //! Zero-copy Python bindings using PyO3 buffer protocol
 
-use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
 use pyo3::ffi;
-use bytes::Bytes;
+use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::generator::{generate_data, DataGenerator, GeneratorConfig, NumaMode};
 
@@ -21,7 +21,7 @@ use crate::numa::NumaTopology;
 
 /// A Python-visible wrapper around bytes::Bytes that exposes buffer protocol.
 /// This allows Python code to get a memoryview without copying data.
-/// 
+///
 /// Implements the Python buffer protocol via __getbuffer__ and __releasebuffer__
 /// so that `memoryview(data)` works directly with zero-copy access.
 #[pyclass(name = "BytesView")]
@@ -36,15 +36,15 @@ impl PyBytesView {
     fn __len__(&self) -> usize {
         self.bytes.len()
     }
-    
+
     /// Support bytes() conversion - returns a copy
     fn __bytes__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.bytes)
     }
-    
+
     /// Implement Python buffer protocol for zero-copy access.
     /// This allows `memoryview(data)` to work directly.
-    /// 
+    ///
     /// The buffer is read-only; requesting a writable buffer will raise BufferError.
     unsafe fn __getbuffer__(
         slf: PyRef<'_, Self>,
@@ -54,45 +54,45 @@ impl PyBytesView {
         // Check for writable request - we only support read-only buffers
         if (flags & ffi::PyBUF_WRITABLE) != 0 {
             return Err(pyo3::exceptions::PyBufferError::new_err(
-                "BytesView is read-only and does not support writable buffers"
+                "BytesView is read-only and does not support writable buffers",
             ));
         }
-        
+
         let bytes = &slf.bytes;
-        
+
         // Fill in the Py_buffer struct
         unsafe {
             (*view).buf = bytes.as_ptr() as *mut std::os::raw::c_void;
             (*view).len = bytes.len() as isize;
             (*view).readonly = 1;
             (*view).itemsize = 1;
-            
+
             // Format string: "B" = unsigned byte (matches u8)
             (*view).format = if (flags & ffi::PyBUF_FORMAT) != 0 {
                 c"B".as_ptr() as *mut std::os::raw::c_char
             } else {
                 std::ptr::null_mut()
             };
-            
+
             (*view).ndim = 1;
-            
+
             // Shape: pointer to the length (1D array of len elements)
             (*view).shape = if (flags & ffi::PyBUF_ND) != 0 {
                 &(*view).len as *const isize as *mut isize
             } else {
                 std::ptr::null_mut()
             };
-            
+
             // Strides: 1 byte per element
             (*view).strides = if (flags & ffi::PyBUF_STRIDES) != 0 {
                 &(*view).itemsize as *const isize as *mut isize
             } else {
                 std::ptr::null_mut()
             };
-            
+
             (*view).suboffsets = std::ptr::null_mut();
             (*view).internal = std::ptr::null_mut();
-            
+
             // CRITICAL: Store a reference to the PyBytesView object
             // This prevents the Bytes data from being deallocated while the buffer is in use
             // Note: Cast is intentionally explicit for PyO3 FFI compatibility across versions
@@ -102,10 +102,10 @@ impl PyBytesView {
             }
             ffi::Py_INCREF((*view).obj);
         }
-        
+
         Ok(())
     }
-    
+
     /// Release the buffer - called when the memoryview is garbage collected.
     /// We don't need to do anything here since the Bytes is reference-counted.
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
@@ -135,7 +135,7 @@ impl PyBytesView {
 /// import dgen_py
 ///
 /// # Generate 1 MiB incompressible data using 8 threads
-/// data = dgen_py.generate_buffer(1024 * 1024, dedup_ratio=1.0, 
+/// data = dgen_py.generate_buffer(1024 * 1024, dedup_ratio=1.0,
 ///                                  compress_ratio=1.0, max_threads=8)
 /// print(f"Generated {len(data)} bytes")
 /// ```
@@ -152,15 +152,18 @@ fn generate_buffer(
     // Convert ratios to integer factors
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
-    
+
     // Parse NUMA mode
     let numa = match numa_mode.to_lowercase().as_str() {
         "auto" => NumaMode::Auto,
         "force" => NumaMode::Force,
         "disabled" | "disable" => NumaMode::Disabled,
-        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'", numa_mode)
-        )),
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'",
+                numa_mode
+            )))
+        }
     };
 
     // Build config
@@ -177,7 +180,7 @@ fn generate_buffer(
 
     // Convert Vec<u8> to Bytes (cheap, just wraps the Vec's heap allocation)
     let bytes = Bytes::from(data);
-    
+
     // Return BytesView - Python can use memoryview() for TRUE zero-copy access
     Py::new(py, PyBytesView { bytes })
 }
@@ -200,9 +203,9 @@ fn generate_buffer(
 ///
 /// # Pre-allocate buffer
 /// buf = bytearray(1024 * 1024)
-/// 
+///
 /// # Generate directly into buffer (zero-copy) using 4 threads
-/// nbytes = dgen_py.generate_into_buffer(buf, dedup_ratio=1.0, 
+/// nbytes = dgen_py.generate_into_buffer(buf, dedup_ratio=1.0,
 ///                                        compress_ratio=2.0, max_threads=4)
 /// print(f"Wrote {nbytes} bytes")
 /// ```
@@ -218,34 +221,37 @@ fn generate_into_buffer(
 ) -> PyResult<usize> {
     // Get buffer via PyBuffer protocol
     let buf: PyBuffer<u8> = PyBuffer::get(buffer.bind(py))?;
-    
+
     // Ensure buffer is writable and contiguous
     if buf.readonly() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Buffer must be writable"
+            "Buffer must be writable",
         ));
     }
-    
+
     if !buf.is_c_contiguous() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Buffer must be C-contiguous for zero-copy operation"
+            "Buffer must be C-contiguous for zero-copy operation",
         ));
     }
 
     let size = buf.len_bytes();
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
-    
+
     // Parse NUMA mode
     let numa = match numa_mode.to_lowercase().as_str() {
         "auto" => NumaMode::Auto,
         "force" => NumaMode::Force,
         "disabled" | "disable" => NumaMode::Disabled,
-        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'", numa_mode)
-        )),
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'",
+                numa_mode
+            )))
+        }
     };
-    
+
     // Build config
     let config = GeneratorConfig {
         size,
@@ -254,7 +260,7 @@ fn generate_into_buffer(
         numa_mode: numa,
         max_threads,
     };
-    
+
     // Generate data
     let data = generate_data(config);
 
@@ -324,15 +330,18 @@ impl PyGenerator {
     ) -> PyResult<Self> {
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
-        
+
         // Parse NUMA mode
         let numa = match numa_mode.to_lowercase().as_str() {
             "auto" => NumaMode::Auto,
             "force" => NumaMode::Force,
             "disabled" | "disable" => NumaMode::Disabled,
-            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'", numa_mode)
-            )),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'",
+                    numa_mode
+                )))
+            }
         };
 
         let config = GeneratorConfig {
@@ -358,21 +367,21 @@ impl PyGenerator {
     fn fill_chunk(&mut self, py: Python<'_>, buffer: PyObject) -> PyResult<usize> {
         // Get buffer via PyBuffer protocol
         let buf: PyBuffer<u8> = PyBuffer::get(buffer.bind(py))?;
-        
+
         if buf.readonly() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Buffer must be writable"
+                "Buffer must be writable",
             ));
         }
-        
+
         if !buf.is_c_contiguous() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Buffer must be C-contiguous"
+                "Buffer must be C-contiguous",
             ));
         }
 
         let size = buf.len_bytes();
-        
+
         // Generate into temporary buffer
         let mut temp = vec![0u8; size];
         let written = self.inner.fill_chunk(&mut temp);
@@ -395,7 +404,11 @@ impl PyGenerator {
     ///
     /// # Returns
     /// BytesView object or None if complete
-    fn get_chunk(&mut self, py: Python<'_>, chunk_size: usize) -> PyResult<Option<Py<PyBytesView>>> {
+    fn get_chunk(
+        &mut self,
+        py: Python<'_>,
+        chunk_size: usize,
+    ) -> PyResult<Option<Py<PyBytesView>>> {
         if self.inner.is_complete() {
             return Ok(None);
         }
@@ -442,7 +455,7 @@ impl PyGenerator {
 #[pyfunction]
 fn get_numa_info(py: Python<'_>) -> PyResult<PyObject> {
     use pyo3::types::PyDict;
-    
+
     let topology = NumaTopology::detect()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
@@ -463,7 +476,7 @@ fn get_numa_info(py: Python<'_>) -> PyResult<PyObject> {
 pub fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Zero-copy buffer type
     m.add_class::<PyBytesView>()?;
-    
+
     // Simple API
     m.add_function(wrap_pyfunction!(generate_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(generate_into_buffer, m)?)?;

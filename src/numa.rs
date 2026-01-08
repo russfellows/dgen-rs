@@ -6,8 +6,8 @@
 //!
 //! Ported from kv-cache-bench/src/main.rs NUMA detection logic
 
-use std::collections::HashSet;
 use anyhow::Result;
+use std::collections::HashSet;
 
 /// NUMA node information
 #[derive(Debug, Clone)]
@@ -41,19 +41,19 @@ impl NumaTopology {
     /// Uses /sys/devices/system/node on Linux for accurate detection
     pub fn detect() -> Result<Self> {
         tracing::debug!("Detecting NUMA topology...");
-        
+
         let num_nodes = detect_numa_nodes()?;
         tracing::info!("Detected {} NUMA node(s)", num_nodes);
-        
+
         let is_uma = num_nodes == 1;
-        
+
         let nodes = if is_uma {
             // UMA system: single node with all CPUs
             let cpus: Vec<usize> = (0..num_cpus::get()).collect();
             vec![NumaNode {
                 node_id: 0,
                 cpus,
-                memory_gb: 0.0,  // Will be detected separately if needed
+                memory_gb: 0.0, // Will be detected separately if needed
             }]
         } else {
             detect_numa_topology_details()?
@@ -87,7 +87,8 @@ impl NumaTopology {
 
     /// Get CPUs for a specific NUMA node
     pub fn cpus_for_node(&self, node_id: usize) -> Option<&[usize]> {
-        self.nodes.iter()
+        self.nodes
+            .iter()
             .find(|n| n.node_id == node_id)
             .map(|n| n.cpus.as_slice())
     }
@@ -99,35 +100,36 @@ impl NumaTopology {
 /// Bare metal multi-socket shows 2+ nodes.
 fn detect_numa_nodes() -> Result<usize> {
     tracing::trace!("detect_numa_nodes called");
-    
+
     #[cfg(target_os = "linux")]
     {
         // Method 1: Check /sys/devices/system/node/
         let node_path = std::path::Path::new("/sys/devices/system/node");
         if node_path.exists() {
             let mut numa_nodes = Vec::new();
-            
+
             for entry in std::fs::read_dir(node_path)? {
                 let entry = entry?;
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                
-                if name_str.starts_with("node") && name_str[4..].chars().all(|c| c.is_ascii_digit()) {
+
+                if name_str.starts_with("node") && name_str[4..].chars().all(|c| c.is_ascii_digit())
+                {
                     if let Ok(node_id) = name_str[4..].parse::<usize>() {
                         numa_nodes.push(node_id);
                     }
                 }
             }
-            
+
             if !numa_nodes.is_empty() {
                 return Ok(numa_nodes.len());
             }
         }
-        
+
         // Method 2: Check /proc/cpuinfo for physical id
         if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
             let mut physical_ids = HashSet::new();
-            
+
             for line in cpuinfo.lines() {
                 if line.starts_with("physical id") {
                     if let Some(id_str) = line.split(':').nth(1) {
@@ -137,13 +139,13 @@ fn detect_numa_nodes() -> Result<usize> {
                     }
                 }
             }
-            
+
             if !physical_ids.is_empty() {
                 return Ok(physical_ids.len());
             }
         }
     }
-    
+
     // Fallback: Assume UMA
     tracing::debug!("Could not detect NUMA topology, assuming UMA");
     Ok(1)
@@ -157,18 +159,18 @@ fn detect_numa_topology_details() -> Result<Vec<NumaNode>> {
         if !node_path.exists() {
             anyhow::bail!("NUMA topology not available");
         }
-        
+
         let mut numa_nodes = Vec::new();
-        
+
         for entry in std::fs::read_dir(node_path)? {
             let entry = entry?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            
+
             if name_str.starts_with("node") && name_str[4..].chars().all(|c| c.is_ascii_digit()) {
                 if let Ok(node_id) = name_str[4..].parse::<usize>() {
                     let node_dir = entry.path();
-                    
+
                     // Read CPUs from cpulist
                     let mut cpus = Vec::new();
                     let cpulist_path = node_dir.join("cpulist");
@@ -177,10 +179,9 @@ fn detect_numa_topology_details() -> Result<Vec<NumaNode>> {
                             if range.contains('-') {
                                 let parts: Vec<&str> = range.split('-').collect();
                                 if parts.len() == 2 {
-                                    if let (Ok(start), Ok(end)) = (
-                                        parts[0].parse::<usize>(),
-                                        parts[1].parse::<usize>()
-                                    ) {
+                                    if let (Ok(start), Ok(end)) =
+                                        (parts[0].parse::<usize>(), parts[1].parse::<usize>())
+                                    {
                                         for cpu in start..=end {
                                             cpus.push(cpu);
                                         }
@@ -191,7 +192,7 @@ fn detect_numa_topology_details() -> Result<Vec<NumaNode>> {
                             }
                         }
                     }
-                    
+
                     // Read memory from meminfo
                     let mut memory_gb = 0.0;
                     let meminfo_path = node_dir.join("meminfo");
@@ -208,7 +209,7 @@ fn detect_numa_topology_details() -> Result<Vec<NumaNode>> {
                             }
                         }
                     }
-                    
+
                     numa_nodes.push(NumaNode {
                         node_id,
                         cpus,
@@ -217,15 +218,15 @@ fn detect_numa_topology_details() -> Result<Vec<NumaNode>> {
                 }
             }
         }
-        
+
         if numa_nodes.is_empty() {
             anyhow::bail!("No NUMA nodes detected");
         }
-        
+
         numa_nodes.sort_by_key(|n| n.node_id);
         Ok(numa_nodes)
     }
-    
+
     #[cfg(not(target_os = "linux"))]
     {
         anyhow::bail!("NUMA detection only supported on Linux");

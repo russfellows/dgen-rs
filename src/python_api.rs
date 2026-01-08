@@ -69,7 +69,7 @@ impl PyBytesView {
             
             // Format string: "B" = unsigned byte (matches u8)
             (*view).format = if (flags & ffi::PyBUF_FORMAT) != 0 {
-                b"B\0".as_ptr() as *mut std::os::raw::c_char
+                c"B".as_ptr() as *mut std::os::raw::c_char
             } else {
                 std::ptr::null_mut()
             };
@@ -95,7 +95,11 @@ impl PyBytesView {
             
             // CRITICAL: Store a reference to the PyBytesView object
             // This prevents the Bytes data from being deallocated while the buffer is in use
-            (*view).obj = slf.as_ptr() as *mut ffi::PyObject;
+            // Note: Cast is intentionally explicit for PyO3 FFI compatibility across versions
+            #[allow(clippy::unnecessary_cast)]
+            {
+                (*view).obj = slf.as_ptr() as *mut ffi::PyObject;
+            }
             ffi::Py_INCREF((*view).obj);
         }
         

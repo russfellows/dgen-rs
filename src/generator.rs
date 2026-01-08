@@ -17,20 +17,15 @@ use crate::constants::*;
 use crate::numa::NumaTopology;
 
 /// NUMA optimization mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NumaMode {
     /// Auto-detect: enable NUMA optimizations only on multi-node systems
+    #[default]
     Auto,
     /// Force NUMA: enable optimizations even on UMA systems (for testing)
     Force,
     /// Disable: never use NUMA optimizations (default for cloud/VM)
     Disabled,
-}
-
-impl Default for NumaMode {
-    fn default() -> Self {
-        NumaMode::Auto
-    }
 }
 
 /// Configuration for data generation

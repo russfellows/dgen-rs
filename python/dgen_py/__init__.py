@@ -1,5 +1,8 @@
 """
 dgen-py: High-performance random data generation with NUMA optimization
+
+TRUE ZERO-COPY: Uses Python buffer protocol for zero-copy access to generated data.
+No memcpy between Rust and Python - same performance as numpy!
 """
 
 from typing import Optional
@@ -8,6 +11,7 @@ import sys
 # Import Rust extension module
 try:
     from ._dgen_rs import (
+        BytesView,
         generate_buffer,
         generate_into_buffer,
         Generator,
@@ -30,10 +34,14 @@ except ImportError as e:
 
 __version__ = "0.1.0"
 __all__ = [
+    "BytesView",
     "generate_buffer",
+    "generate_data",
     "generate_into_buffer",
+    "fill_buffer",
     "Generator",
     "get_numa_info",
+    "get_system_info",
 ]
 
 
@@ -43,33 +51,43 @@ def generate_data(
     compress_ratio: float = 1.0,
     numa_mode: str = "auto",
     max_threads: Optional[int] = None,
-) -> bytes:
+):
     """
-    Generate random data with controllable deduplication and compression.
+    Generate random data with ZERO-COPY access via buffer protocol.
     
-    This is the simplest API - generates all data in one call.
-    For large datasets, consider using Generator for streaming generation.
+    Returns a BytesView object that supports memoryview() for true zero-copy access.
+    No memcpy between Rust and Python - same memory is shared!
     
     Args:
         size: Total bytes to generate
         dedup_ratio: Deduplication ratio (1.0 = no dedup, 2.0 = 2:1 ratio)
         compress_ratio: Compression ratio (1.0 = incompressible, 3.0 = 3:1 ratio)
-        numa_mode: NUMA optimization - "auto" (default), "force", or "disabled"
+        numa_mode: NUMA optimization - \"auto\" (default), \"force\", or \"disabled\"
         max_threads: Maximum threads to use (None = use all cores)
     
     Returns:
-        bytes: Generated data (zero-copy from Rust)
+        BytesView: Zero-copy buffer (use memoryview() or numpy.frombuffer() for access)
     
-    Example:
+    Example - Zero-copy with numpy (fastest):
         >>> import dgen_py
-        >>> # Generate 1 MiB incompressible data
+        >>> import numpy as np
+        >>> 
+        >>> # Generate data (no copy)
         >>> data = dgen_py.generate_data(1024 * 1024)
-        >>> len(data)
-        1048576
+        >>> 
+        >>> # Create memoryview (no copy)
+        >>> view = memoryview(data)
+        >>> 
+        >>> # Create numpy array (STILL no copy!)
+        >>> arr = np.frombuffer(view, dtype=np.uint8)
+        >>> 
+        >>> # All three share the SAME memory - zero copies!
+        >>> len(data), len(view), len(arr)
+        (1048576, 1048576, 1048576)
         
-        >>> # Generate 10 MiB with 2:1 dedup and 3:1 compression using 8 threads
-        >>> data = dgen_py.generate_data(10 * 1024 * 1024, dedup_ratio=2.0, 
-        ...                               compress_ratio=3.0, max_threads=8)
+    Example - Get Python bytes (copies data):
+        >>> # If you need actual bytes object, call bytes()
+        >>> data_bytes = bytes(data)  # This copies, but gives you bytes object
     """
     return generate_buffer(size, dedup_ratio, compress_ratio, numa_mode, max_threads)
 

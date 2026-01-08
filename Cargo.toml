@@ -18,6 +18,7 @@ crate-type = ["cdylib", "rlib"]  # cdylib for Python bindings, rlib for Rust usa
 rand = { version = "0.9", features = ["std", "alloc"] }
 rand_xoshiro = "0.7"  # Xoshiro256++ for high-performance RNG
 rayon = "1.10"  # Parallel data generation
+bytes = "^1.10"  # Zero-copy buffer type for Python integration
 
 # PyO3 for Python bindings
 pyo3 = { version = "0.23", features = ["extension-module"], optional = true }

@@ -2,16 +2,113 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Zero-copy Python bindings using PyO3
+//! Zero-copy Python bindings using PyO3 buffer protocol
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::buffer::PyBuffer;
+use pyo3::ffi;
+use bytes::Bytes;
 
 use crate::generator::{generate_data, DataGenerator, GeneratorConfig, NumaMode};
 
 #[cfg(feature = "numa")]
 use crate::numa::NumaTopology;
+
+// =============================================================================
+// Zero-Copy Buffer Support
+// =============================================================================
+
+/// A Python-visible wrapper around bytes::Bytes that exposes buffer protocol.
+/// This allows Python code to get a memoryview without copying data.
+/// 
+/// Implements the Python buffer protocol via __getbuffer__ and __releasebuffer__
+/// so that `memoryview(data)` works directly with zero-copy access.
+#[pyclass(name = "BytesView")]
+pub struct PyBytesView {
+    /// The underlying Bytes (reference-counted, cheap to clone)
+    bytes: Bytes,
+}
+
+#[pymethods]
+impl PyBytesView {
+    /// Get the length of the data
+    fn __len__(&self) -> usize {
+        self.bytes.len()
+    }
+    
+    /// Support bytes() conversion - returns a copy
+    fn __bytes__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.bytes)
+    }
+    
+    /// Implement Python buffer protocol for zero-copy access.
+    /// This allows `memoryview(data)` to work directly.
+    /// 
+    /// The buffer is read-only; requesting a writable buffer will raise BufferError.
+    unsafe fn __getbuffer__(
+        slf: PyRef<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        // Check for writable request - we only support read-only buffers
+        if (flags & ffi::PyBUF_WRITABLE) != 0 {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "BytesView is read-only and does not support writable buffers"
+            ));
+        }
+        
+        let bytes = &slf.bytes;
+        
+        // Fill in the Py_buffer struct
+        unsafe {
+            (*view).buf = bytes.as_ptr() as *mut std::os::raw::c_void;
+            (*view).len = bytes.len() as isize;
+            (*view).readonly = 1;
+            (*view).itemsize = 1;
+            
+            // Format string: "B" = unsigned byte (matches u8)
+            (*view).format = if (flags & ffi::PyBUF_FORMAT) != 0 {
+                b"B\0".as_ptr() as *mut std::os::raw::c_char
+            } else {
+                std::ptr::null_mut()
+            };
+            
+            (*view).ndim = 1;
+            
+            // Shape: pointer to the length (1D array of len elements)
+            (*view).shape = if (flags & ffi::PyBUF_ND) != 0 {
+                &(*view).len as *const isize as *mut isize
+            } else {
+                std::ptr::null_mut()
+            };
+            
+            // Strides: 1 byte per element
+            (*view).strides = if (flags & ffi::PyBUF_STRIDES) != 0 {
+                &(*view).itemsize as *const isize as *mut isize
+            } else {
+                std::ptr::null_mut()
+            };
+            
+            (*view).suboffsets = std::ptr::null_mut();
+            (*view).internal = std::ptr::null_mut();
+            
+            // CRITICAL: Store a reference to the PyBytesView object
+            // This prevents the Bytes data from being deallocated while the buffer is in use
+            (*view).obj = slf.as_ptr() as *mut ffi::PyObject;
+            ffi::Py_INCREF((*view).obj);
+        }
+        
+        Ok(())
+    }
+    
+    /// Release the buffer - called when the memoryview is garbage collected.
+    /// We don't need to do anything here since the Bytes is reference-counted.
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
+        // Nothing to do - the Py_DECREF on view.obj will be handled by Python
+        // and will eventually drop the PyBytesView (and thus the Bytes) when refcount hits 0
+    }
+}
 
 // =============================================================================
 // Simple API - Single-call data generation
@@ -47,7 +144,7 @@ fn generate_buffer(
     compress_ratio: f64,
     numa_mode: &str,
     max_threads: Option<usize>,
-) -> PyResult<Py<PyBytes>> {
+) -> PyResult<Py<PyBytesView>> {
     // Convert ratios to integer factors
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
@@ -71,12 +168,14 @@ fn generate_buffer(
         max_threads,
     };
 
-    // Generate data
-    let data = generate_data(config);
+    // Generate data WITHOUT holding GIL (allows parallel Python threads)
+    let data = py.allow_threads(|| generate_data(config));
 
-    // Return as PyBytes (zero-copy via Into<Py<PyBytes>>)
-    // PyO3 transfers ownership of Vec<u8> to Python, avoiding copy
-    Ok(PyBytes::new(py, &data).into())
+    // Convert Vec<u8> to Bytes (cheap, just wraps the Vec's heap allocation)
+    let bytes = Bytes::from(data);
+    
+    // Return BytesView - Python can use memoryview() for TRUE zero-copy access
+    Py::new(py, PyBytesView { bytes })
 }
 
 /// Generate data using Python buffer protocol (for writing into existing buffer)
@@ -285,14 +384,14 @@ impl PyGenerator {
         Ok(written)
     }
 
-    /// Get data as bytes (convenience method, allocates new buffer)
+    /// Get data as BytesView (zero-copy access via memoryview)
     ///
     /// # Arguments
     /// * `chunk_size` - Size of chunk to read
     ///
     /// # Returns
-    /// Python bytes object or None if complete
-    fn get_chunk(&mut self, py: Python<'_>, chunk_size: usize) -> PyResult<Option<Py<PyBytes>>> {
+    /// BytesView object or None if complete
+    fn get_chunk(&mut self, py: Python<'_>, chunk_size: usize) -> PyResult<Option<Py<PyBytesView>>> {
         if self.inner.is_complete() {
             return Ok(None);
         }
@@ -304,7 +403,9 @@ impl PyGenerator {
             Ok(None)
         } else {
             chunk.truncate(written);
-            Ok(Some(PyBytes::new(py, &chunk).into()))
+            // Convert to Bytes for zero-copy Python access
+            let bytes = Bytes::from(chunk);
+            Ok(Some(Py::new(py, PyBytesView { bytes })?))
         }
     }
 
@@ -356,6 +457,9 @@ fn get_numa_info(py: Python<'_>) -> PyResult<PyObject> {
 // =============================================================================
 
 pub fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Zero-copy buffer type
+    m.add_class::<PyBytesView>()?;
+    
     // Simple API
     m.add_function(wrap_pyfunction!(generate_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(generate_into_buffer, m)?)?;

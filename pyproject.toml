@@ -3,9 +3,9 @@ name = "dgen-py"
 version = "0.1.0"
 description = "High-performance random data generation with NUMA optimization and zero-copy Python interface"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
-    "numpy>=2.4.0",
+    "numpy>=1.21.0",
 ]
 license = { text = "MIT OR Apache-2.0" }
 authors = [{ name = "Russ Fellows", email = "russ.fellows@gmail.com" }]
@@ -23,6 +23,7 @@ requires = ["maturin>=1.0.0"]
 build-backend = "maturin"
 
 [tool.maturin]
+features = ["python-bindings"]
 module-name = "dgen_py._dgen_rs"  # Put the .so inside the dgen_py package
 python-source = "python"
 python-packages = ["dgen_py"]

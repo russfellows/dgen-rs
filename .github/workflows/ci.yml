@@ -25,6 +25,8 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.90'
       
       - name: Build (Rust)
         run: cargo build --release

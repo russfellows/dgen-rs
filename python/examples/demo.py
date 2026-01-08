@@ -50,7 +50,7 @@ def test_streaming():
         size=size,
         dedup_ratio=2.0,
         compress_ratio=2.0,
-        numa_aware=True
+        numa_mode="auto"
     )
     
     buf = bytearray(chunk_size)

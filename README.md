@@ -3,6 +3,9 @@
 **High-performance random data generation with controllable deduplication, compression, and NUMA optimization**
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
+[![Rust Version](https://img.shields.io/badge/rust-1.90+-orange.svg)](https://www.rust-lang.org)
+[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
+[![Tests](https://img.shields.io/badge/tests-14%20passing-brightgreen.svg)](#testing)
 
 ## Features
 
@@ -217,9 +220,9 @@ python -m pytest python/tests/
 
 ## Requirements
 
-- **Rust**: 1.70+ (edition 2021)
-- **Python**: 3.12+ (for Python bindings)
-- **Platform**: Linux (NUMA detection), macOS, Windows
+- **Rust**: 1.90+ (edition 2021)
+- **Python**: 3.10+ (for Python bindings)
+- **Platform**: Linux (NUMA detection required)
 
 ## License
 
@@ -228,7 +231,6 @@ Dual-licensed under MIT OR Apache-2.0
 ## Credits
 
 - Data generation algorithm ported from [s3dlio](https://github.com/russfellows/s3dlio)
-- NUMA detection logic from [kv-cache-bench](https://github.com/russfellows/kv-cache-bench)
 - Built with [PyO3](https://pyo3.rs/) and [Maturin](https://www.maturin.rs/)
 
 ## See Also

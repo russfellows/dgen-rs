@@ -26,7 +26,8 @@ class Generator:
         size: int,
         dedup_ratio: float = 1.0,
         compress_ratio: float = 1.0,
-        numa_aware: Optional[bool] = None
+        numa_mode: str = "auto",
+        max_threads: Optional[int] = None
     ) -> None:
         """Create new generator"""
         ...

@@ -1,6 +1,6 @@
 [project]
 name = "dgen-py"
-version = "0.1.1"
+version = "0.1.2"
 description = "High-performance random data generation with NUMA optimization and zero-copy Python interface"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,11 +23,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Benchmark",
 ]
-
-[project.urls]
-Homepage = "https://github.com/russfellows/dgen-rs"
-Repository = "https://github.com/russfellows/dgen-rs"
-Documentation = "https://github.com/russfellows/dgen-rs/blob/master/README.md"
 
 [project.optional-dependencies]
 numpy = ["numpy>=2.0.0"]

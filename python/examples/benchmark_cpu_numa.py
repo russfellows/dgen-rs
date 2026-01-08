@@ -267,9 +267,10 @@ def main():
     if numa_info:
         print(f"System Information:")
         print(f"  NUMA nodes: {numa_info['num_nodes']}")
-        print(f"  Total CPUs: {numa_info['total_cpus']}")
-        for node in numa_info['nodes']:
-            print(f"    Node {node['node_id']}: {node['num_cpus']} CPUs, {node['memory_gb']:.1f} GB RAM")
+        print(f"  Physical cores: {numa_info['physical_cores']}")
+        print(f"  Logical CPUs: {numa_info['logical_cpus']}")
+        print(f"  UMA system: {numa_info['is_uma']}")
+        print(f"  Deployment: {numa_info['deployment_type']}")
     else:
         import multiprocessing
         print(f"System Information:")

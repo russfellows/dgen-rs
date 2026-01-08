@@ -29,20 +29,35 @@ jobs:
           toolchain: '1.90'
       
       - name: Build (Rust)
-        run: cargo build --release
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            cargo build --release
+          else
+            cargo build --release --no-default-features --features python-bindings
+          fi
+        shell: bash
       
       - name: Test (Rust)
-        run: cargo test --release
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            cargo test --release
+          else
+            cargo test --release --no-default-features --features python-bindings
+          fi
+        shell: bash
       
       - name: Build (Python)
         run: |
           pip install maturin
-          maturin develop --release
+          maturin build --release --out dist
+          pip install dist/*.whl
+        shell: bash
       
       - name: Test (Python)
         run: |
           python -c "import dgen_py; data = dgen_py.generate_data(1024); print(f'✓ Generated {len(data)} bytes')"
           python -c "import dgen_py; info = dgen_py.get_system_info(); print(f'✓ System info: {info}')"
+        shell: bash
 
   lint:
     name: Lint

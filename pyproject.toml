@@ -9,6 +9,24 @@ dependencies = [
 ]
 license = { text = "MIT OR Apache-2.0" }
 authors = [{ name = "Russ Fellows", email = "russ.fellows@gmail.com" }]
+keywords = ["data-generation", "benchmark", "numa", "performance", "zero-copy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Benchmark",
+]
+
+[project.urls]
+Homepage = "https://github.com/russfellows/dgen-rs"
+Repository = "https://github.com/russfellows/dgen-rs"
+Documentation = "https://github.com/russfellows/dgen-rs/blob/master/README.md"
 
 [project.optional-dependencies]
 numpy = ["numpy>=2.0.0"]

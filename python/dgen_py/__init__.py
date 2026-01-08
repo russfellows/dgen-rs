@@ -32,7 +32,7 @@ except ImportError as e:
         "  cd dgen-rs && maturin develop --release"
     )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "BytesView",
     "generate_buffer",

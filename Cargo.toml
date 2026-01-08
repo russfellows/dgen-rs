@@ -1,0 +1,54 @@
+[package]
+name = "dgen-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Russ Fellows <russ.fellows@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "High-performance random data generation with controllable deduplication and compression"
+repository = "https://github.com/russfellows/dgen-rs"
+keywords = ["data", "generation", "benchmark", "performance", "numa"]
+categories = ["development-tools::profiling", "algorithms"]
+
+[lib]
+name = "dgen_rs"
+crate-type = ["cdylib", "rlib"]  # cdylib for Python bindings, rlib for Rust usage
+
+[dependencies]
+# RNG and data generation
+rand = { version = "0.9", features = ["std", "alloc"] }
+rand_xoshiro = "0.7"  # Xoshiro256++ for high-performance RNG
+rayon = "1.10"  # Parallel data generation
+
+# PyO3 for Python bindings
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+
+# NUMA topology detection and thread pinning
+hwloc2 = { version = "2.2", optional = true }
+core_affinity = { version = "0.8", optional = true }
+num_cpus = "1.16"  # Required for NUMA detection
+
+# Logging
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.20"
+
+[features]
+default = ["python-bindings", "numa", "thread-pinning"]
+python-bindings = ["pyo3"]
+numa = ["hwloc2"]
+thread-pinning = ["core_affinity"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"

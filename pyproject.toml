@@ -1,0 +1,27 @@
+[project]
+name = "dgen-py"
+version = "0.1.0"
+description = "High-performance random data generation with NUMA optimization and zero-copy Python interface"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Russ Fellows", email = "russ.fellows@gmail.com" }]
+
+[project.optional-dependencies]
+numpy = ["numpy>=2.0.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-benchmark>=4.0.0",
+    "maturin>=1.0.0",
+]
+
+[build-system]
+requires = ["maturin>=1.0.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+module-name = "dgen_py._dgen_rs"  # Put the .so inside the dgen_py package
+python-source = "python"
+python-packages = ["dgen_py"]
+features = ["python-bindings"]  # Enable PyO3 features

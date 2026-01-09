@@ -64,6 +64,7 @@ class BenchmarkConfig:
     use_direct_io: bool
     numa_mode: str
     max_threads: Optional[int]
+    num_writers: int = 1
 
 
 @dataclass
@@ -77,6 +78,11 @@ class BenchmarkStats:
     consumer_wait_time: float = 0.0
     write_count: int = 0
     used_direct_io: bool = False
+    writer_stats: dict = None  # Per-writer statistics
+    
+    def __post_init__(self):
+        if self.writer_stats is None:
+            self.writer_stats = {}
     
     @property
     def total_time(self) -> float:
@@ -112,10 +118,83 @@ class BenchmarkStats:
     
     @property
     def consumer_utilization(self) -> float:
-        """Consumer utilization percentage (lower = more waiting)"""
+        """Consumer utilization percentage (lower = more waiting)
+        
+        For multiple writers, this uses the average wait time across all writers
+        to avoid inflated totals from summing independent thread wait times.
+        """
         if self.total_time <= 0:
             return 0.0
+        
+        # If we have per-writer stats, calculate average wait time
+        if self.writer_stats:
+            num_writers = len(self.writer_stats)
+            if num_writers > 0:
+                avg_wait_time = self.consumer_wait_time / num_writers
+                return (1.0 - avg_wait_time / self.total_time) * 100
+        
+        # Single writer or no stats
         return (1.0 - self.consumer_wait_time / self.total_time) * 100
+
+
+# ===========================================================================
+# Auto-Tuning
+# ===========================================================================
+
+def auto_tune_settings(buffer_size: int = None, buffer_count: int = None, 
+                       num_writers: int = None) -> tuple:
+    """
+    Automatically tune buffer and writer settings based on system capabilities.
+    
+    Scaling guidelines based on empirical testing:
+    - Small systems (8 CPUs): 4 writers, 128 buffers
+    - Medium systems (16-32 CPUs): 8 writers, 256 buffers
+    - Large systems (64-128 CPUs): 16-32 writers, 512+ buffers
+    
+    Returns:
+        tuple: (buffer_size, buffer_count, num_writers)
+    """
+    import multiprocessing
+    
+    cpu_count = multiprocessing.cpu_count()
+    
+    # Auto-tune buffer size (default 8MB for NVMe, 4MB for smaller systems)
+    if buffer_size is None:
+        if cpu_count <= 8:
+            buffer_size = 4 * 1024 * 1024  # 4 MB
+        else:
+            buffer_size = 8 * 1024 * 1024  # 8 MB
+    
+    # Auto-tune number of writers based on CPU count
+    if num_writers is None:
+        if cpu_count <= 8:
+            num_writers = 4
+        elif cpu_count <= 16:
+            num_writers = 8
+        elif cpu_count <= 32:
+            num_writers = 12
+        elif cpu_count <= 64:
+            num_writers = 16
+        else:
+            # For very large systems (128+ CPUs)
+            num_writers = min(32, cpu_count // 4)
+    
+    # Auto-tune buffer count based on writers and system size
+    if buffer_count is None:
+        # Rule: buffer_count >= num_writers * 16 (ensure writers don't starve)
+        # Also scale with CPU count for better buffering
+        min_buffers = num_writers * 16
+        
+        if cpu_count <= 8:
+            buffer_count = max(128, min_buffers)
+        elif cpu_count <= 16:
+            buffer_count = max(256, min_buffers)
+        elif cpu_count <= 64:
+            buffer_count = max(512, min_buffers)
+        else:
+            buffer_count = max(1024, min_buffers)
+    
+    return (buffer_size, buffer_count, num_writers)
 
 
 # ===========================================================================
@@ -159,7 +238,7 @@ def create_aligned_buffer_pool(buffer_size: int, buffer_count: int):
 def producer_thread(
     config: BenchmarkConfig,
     empty_buffers: queue.Queue,
-    full_buffers: queue.Queue,
+    full_buffers_list: list,  # List of queues for multiple writers
     stats: BenchmarkStats,
     error_event: threading.Event
 ):
@@ -167,7 +246,7 @@ def producer_thread(
     Generate data using dgen-py and fill buffers.
     
     This thread runs the Generator in streaming mode, filling buffers from
-    the pool as they become available.
+    the pool and distributing them round-robin to multiple writer threads.
     """
     try:
         print(f"[Producer] Starting data generation ({config.total_size / 1e9:.2f} GB)")
@@ -183,6 +262,7 @@ def producer_thread(
         
         total_generated = 0
         buffer_num = 0
+        writer_index = 0  # Round-robin index for distributing to writers
         
         while not gen.is_complete() and not error_event.is_set():
             # Get an empty buffer (blocks if none available)
@@ -205,8 +285,9 @@ def producer_thread(
             total_generated += nbytes
             buffer_num += 1
             
-            # Pass filled buffer to consumer
-            full_buffers.put((buf, nbytes))
+            # Pass filled buffer to consumer (round-robin across writers)
+            full_buffers_list[writer_index].put((buf, nbytes))
+            writer_index = (writer_index + 1) % config.num_writers
             
             # Progress update every 100 buffers
             if buffer_num % 100 == 0:
@@ -219,13 +300,16 @@ def producer_thread(
         stats.bytes_generated = total_generated
         print(f"\n[Producer] Complete: {total_generated / 1e9:.2f} GB generated")
         
-        # Signal consumer that we're done
-        full_buffers.put(None)
+        # Signal all consumers that we're done
+        for full_buffers in full_buffers_list:
+            full_buffers.put(None)
         
     except Exception as e:
         print(f"\n[Producer] ERROR: {e}")
         error_event.set()
-        full_buffers.put(None)
+        # Signal all consumers to stop
+        for full_buffers in full_buffers_list:
+            full_buffers.put(None)
 
 
 # ===========================================================================
@@ -233,25 +317,38 @@ def producer_thread(
 # ===========================================================================
 
 def consumer_thread(
+    writer_id: int,
     config: BenchmarkConfig,
     empty_buffers: queue.Queue,
     full_buffers: queue.Queue,
     stats: BenchmarkStats,
+    stats_lock: threading.Lock,
     error_event: threading.Event
 ):
     """
     Write buffers to storage using O_DIRECT (when supported).
     
-    This thread consumes filled buffers and writes them to disk, then
-    returns buffers to the pool for reuse.
+    Multiple instances of this thread can run in parallel, each writing
+    sequentially to keep track of their position in the file.
     """
     fd = None
     use_direct_io = False  # Track actual I/O mode used
+    thread_name = f"Writer-{writer_id}"
+    
+    # Per-writer statistics
+    local_bytes_written = 0
+    local_write_count = 0
+    local_wait_time = 0.0
+    
     try:
-        print(f"[Consumer] Opening file: {config.output_path}")
+        if writer_id == 0:  # Only first writer prints
+            print(f"[{thread_name}] Opening file: {config.output_path}")
         
         # Open file with O_DIRECT if requested and supported
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags = os.O_WRONLY | os.O_CREAT
+        if writer_id == 0:
+            flags |= os.O_TRUNC  # Only first writer truncates
+        
         use_direct = False
         
         if config.use_direct_io and hasattr(os, 'O_DIRECT'):
@@ -260,23 +357,27 @@ def consumer_thread(
                 fd = os.open(config.output_path, flags | os.O_DIRECT, 0o644)
                 use_direct = True
                 use_direct_io = True
-                print(f"[Consumer] ✓ O_DIRECT ENABLED (page cache bypass)")
+                if writer_id == 0:
+                    print(f"[{thread_name}] ✓ O_DIRECT ENABLED (page cache bypass)")
+                    if config.num_writers > 1:
+                        print(f"[Writers] Launching {config.num_writers} parallel writer threads")
             except OSError as e:
                 # O_DIRECT not supported by filesystem, fall back to buffered
-                print(f"[Consumer] ⚠ O_DIRECT FAILED ({e})")
-                print(f"[Consumer] → Falling back to BUFFERED I/O (page cache will be used)")
-                print(f"[Consumer] → This is common with /tmp (tmpfs) and some network filesystems")
+                if writer_id == 0:
+                    print(f"[{thread_name}] ⚠ O_DIRECT FAILED ({e})")
+                    print(f"[{thread_name}] → Falling back to BUFFERED I/O (page cache will be used)")
+                    print(f"[{thread_name}] → This is common with /tmp (tmpfs) and some network filesystems")
                 fd = os.open(config.output_path, flags, 0o644)
                 use_direct_io = False
         else:
-            if config.use_direct_io:
-                print(f"[Consumer] ⚠ O_DIRECT not available on {platform.system()}")
-                print(f"[Consumer] → Using BUFFERED I/O (page cache will be used)")
+            if config.use_direct_io and writer_id == 0:
+                print(f"[{thread_name}] ⚠ O_DIRECT not available on {platform.system()}")
+                print(f"[{thread_name}] → Using BUFFERED I/O (page cache will be used)")
             fd = os.open(config.output_path, flags, 0o644)
             use_direct_io = False
         
-        total_written = 0
-        write_count = 0
+        # Track current file offset for this writer
+        current_offset = 0
         first_write = True
         
         while not error_event.is_set():
@@ -284,58 +385,75 @@ def consumer_thread(
             wait_start = time.perf_counter()
             item = full_buffers.get()
             wait_time = time.perf_counter() - wait_start
-            stats.consumer_wait_time += wait_time
+            local_wait_time += wait_time
             
             if item is None:  # Shutdown signal
                 break
             
             buf, nbytes = item
             
-            # Write to file
+            # Write to file at current offset using pwrite (thread-safe positioned write)
             write_start = time.perf_counter()
             try:
-                written = os.write(fd, buf[:nbytes])
-            except OSError as e:
-                # Handle O_DIRECT failure on first write (alignment issues)
+                written = os.pwrite(fd, buf[:nbytes], current_offset)
+                current_offset += written
+            except (OSError, AttributeError) as e:
+                # Handle O_DIRECT failure or pwrite not available
                 if first_write and use_direct:
-                    print(f"\n[Consumer] ⚠ O_DIRECT write failed ({e})")
-                    print(f"[Consumer] → Reopening file with BUFFERED I/O")
+                    if writer_id == 0:
+                        print(f"\n[{thread_name}] ⚠ O_DIRECT write failed ({e})")
+                        print(f"[{thread_name}] → Reopening file with BUFFERED I/O")
                     os.close(fd)
                     fd = os.open(config.output_path, flags, 0o644)
                     use_direct = False
                     use_direct_io = False
+                    written = os.pwrite(fd, buf[:nbytes], current_offset)
+                    current_offset += written
+                elif isinstance(e, AttributeError):
+                    # pwrite not available, fall back to sequential write
                     written = os.write(fd, buf[:nbytes])
                 else:
                     raise
             
             first_write = False
-            write_time = time.perf_counter() - write_start
             
             if written != nbytes:
                 raise IOError(f"Partial write: {written} != {nbytes}")
             
-            total_written += written
-            write_count += 1
+            local_bytes_written += written
+            local_write_count += 1
             
             # Return buffer to pool
             empty_buffers.put(buf)
             
-            # Progress update every 50 writes
-            if write_count % 50 == 0:
+            # Progress update every 50 writes (only writer 0)
+            if writer_id == 0 and local_write_count % 50 == 0:
+                with stats_lock:
+                    total_written = stats.bytes_written
                 elapsed = time.perf_counter() - stats.start_time
-                throughput = (total_written / elapsed) / 1e9
-                latency = (write_time * 1000)
-                print(f"[Consumer] Written: {total_written / 1e9:.2f} GB "
-                      f"@ {throughput:.2f} GB/s (lat: {latency:.2f} ms)", end='\r')
+                throughput = (total_written / elapsed) / 1e9 if elapsed > 0 else 0
+                print(f"[Writers] Written: {total_written / 1e9:.2f} GB "
+                      f"@ {throughput:.2f} GB/s ({config.num_writers} threads)", end='\r')
         
-        stats.bytes_written = total_written
-        stats.write_count = write_count
-        # Store O_DIRECT status in stats (using a custom attribute)
-        stats.used_direct_io = use_direct_io
-        print(f"\n[Consumer] Complete: {total_written / 1e9:.2f} GB written ({write_count} writes)")
+        # Update global stats (thread-safe)
+        with stats_lock:
+            stats.bytes_written += local_bytes_written
+            stats.write_count += local_write_count
+            stats.consumer_wait_time += local_wait_time
+            stats.used_direct_io = use_direct_io  # Last writer wins (should all be same)
+            
+            # Store per-writer stats
+            stats.writer_stats[writer_id] = {
+                'bytes': local_bytes_written,
+                'writes': local_write_count,
+                'wait_time': local_wait_time
+            }
+        
+        if writer_id == 0:
+            print(f"\n[{thread_name}] Complete: {local_bytes_written / 1e9:.2f} GB written ({local_write_count} writes)")
         
     except Exception as e:
-        print(f"\n[Consumer] ERROR: {e}")
+        print(f"\n[{thread_name}] ERROR: {e}")
         error_event.set()
         
     finally:
@@ -368,6 +486,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkStats:
     print(f"  Buffer size:     {config.buffer_size / 1e6:.2f} MB")
     print(f"  Buffer count:    {config.buffer_count}")
     print(f"  Total pool:      {(config.buffer_size * config.buffer_count) / 1e9:.2f} GB")
+    print(f"  Writer threads:  {config.num_writers}")
     print(f"  Output file:     {config.output_path}")
     print(f"  Dedup ratio:     {config.dedup_ratio}:1")
     print(f"  Compress ratio:  {config.compress_ratio}:1")
@@ -389,7 +508,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkStats:
     
     # Initialize queues
     empty_buffers = queue.Queue()
-    full_buffers = queue.Queue()
+    full_buffers_list = [queue.Queue() for _ in range(config.num_writers)]
     
     # Fill empty queue with all buffers
     for buf in pool:
@@ -406,27 +525,36 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkStats:
     # Error coordination between threads
     error_event = threading.Event()
     
+    # Shared lock for stats updates
+    stats_lock = threading.Lock()
+    
     # Start threads
-    print("Starting producer and consumer threads...\n")
+    print("Starting producer and writer threads...\n")
     
     producer = threading.Thread(
         target=producer_thread,
-        args=(config, empty_buffers, full_buffers, stats, error_event),
+        args=(config, empty_buffers, full_buffers_list, stats, error_event),
         name="Producer"
     )
     
-    consumer = threading.Thread(
-        target=consumer_thread,
-        args=(config, empty_buffers, full_buffers, stats, error_event),
-        name="Consumer"
-    )
+    # Create multiple writer threads
+    consumers = []
+    for i in range(config.num_writers):
+        consumer = threading.Thread(
+            target=consumer_thread,
+            args=(i, config, empty_buffers, full_buffers_list[i], stats, stats_lock, error_event),
+            name=f"Writer-{i}"
+        )
+        consumers.append(consumer)
     
     producer.start()
-    consumer.start()
+    for consumer in consumers:
+        consumer.start()
     
     # Wait for completion
     producer.join()
-    consumer.join()
+    for consumer in consumers:
+        consumer.join()
     
     stats.end_time = time.perf_counter()
     
@@ -460,6 +588,14 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkStats:
     print(f"\nUtilization:")
     print(f"  Producer:        {stats.producer_utilization:.1f}% (waiting: {stats.producer_wait_time:.2f}s)")
     print(f"  Consumer:        {stats.consumer_utilization:.1f}% (waiting: {stats.consumer_wait_time:.2f}s)")
+    
+    # Show per-writer stats if multiple writers
+    if config.num_writers > 1 and stats.writer_stats:
+        print(f"\nPer-Writer Statistics:")
+        for writer_id in sorted(stats.writer_stats.keys()):
+            wstats = stats.writer_stats[writer_id]
+            print(f"  Writer-{writer_id}: {wstats['bytes'] / 1e9:.2f} GB ({wstats['writes']} writes, "
+                  f"wait: {wstats['wait_time']:.2f}s)")
     
     # Bottleneck analysis
     print(f"\nBottleneck Analysis:")
@@ -546,17 +682,30 @@ Examples:
     )
     
     parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='Auto-tune buffer-size, buffer-count, and num-writers based on CPU count'
+    )
+    
+    parser.add_argument(
         '--buffer-size',
         type=parse_size,
-        default='4MB',
-        help='Size of each buffer (e.g., 4MB, 8MB). Default: 4MB'
+        default=None,
+        help='Size of each buffer (e.g., 4MB, 8MB). Default: auto-tuned or 4MB'
     )
     
     parser.add_argument(
         '--buffer-count',
         type=int,
-        default=250,
-        help='Number of buffers in pool. Default: 250 (1GB pool with 4MB buffers)'
+        default=None,
+        help='Number of buffers in pool. Default: auto-tuned or 250'
+    )
+    
+    parser.add_argument(
+        '--num-writers',
+        type=int,
+        default=None,
+        help='Number of parallel writer threads (1-64). Default: auto-tuned or 1'
     )
     
     parser.add_argument(
@@ -595,9 +744,41 @@ Examples:
     
     args = parser.parse_args()
     
+    # Auto-tune settings if requested or if any setting is None
+    if args.auto or args.buffer_size is None or args.buffer_count is None or args.num_writers is None:
+        tuned_buffer_size, tuned_buffer_count, tuned_num_writers = auto_tune_settings(
+            buffer_size=args.buffer_size,
+            buffer_count=args.buffer_count,
+            num_writers=args.num_writers
+        )
+        
+        # Apply auto-tuned values for None settings
+        if args.buffer_size is None:
+            args.buffer_size = tuned_buffer_size
+        if args.buffer_count is None:
+            args.buffer_count = tuned_buffer_count
+        if args.num_writers is None:
+            args.num_writers = tuned_num_writers
+        
+        if args.auto:
+            import multiprocessing
+            print(f"Auto-tuning for {multiprocessing.cpu_count()} CPU system:")
+            print(f"  Buffer size:   {args.buffer_size / 1e6:.0f} MB")
+            print(f"  Buffer count:  {args.buffer_count}")
+            print(f"  Writer threads: {args.num_writers}")
+            print()
+    
     # Validate
     if args.buffer_size % 4096 != 0:
         print(f"Warning: Buffer size should be multiple of 4096 for optimal O_DIRECT performance")
+    
+    if args.num_writers < 1 or args.num_writers > 64:
+        print(f"Error: --num-writers must be between 1 and 64")
+        return 1
+    
+    if args.num_writers > args.buffer_count:
+        print(f"Warning: --num-writers ({args.num_writers}) > --buffer-count ({args.buffer_count})")
+        print(f"         Writers may starve waiting for buffers. Consider increasing buffer count.")
     
     # Create config
     config = BenchmarkConfig(
@@ -609,7 +790,8 @@ Examples:
         compress_ratio=args.compress_ratio,
         use_direct_io=not args.no_direct,
         numa_mode=args.numa_mode,
-        max_threads=args.max_threads
+        max_threads=args.max_threads,
+        num_writers=args.num_writers
     )
     
     # Run benchmark

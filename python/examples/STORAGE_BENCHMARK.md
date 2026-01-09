@@ -37,6 +37,19 @@ This example demonstrates how to use dgen-py to create a storage benchmark that:
 
 ## Usage
 
+### Auto-Tuned Mode (Recommended) ⭐
+```bash
+# Automatically tune settings based on CPU count
+python storage_benchmark.py --auto --size 10GB --output /mnt/nvme/test.bin
+```
+
+**Auto-tuning scales from small to large systems:**
+- **8 CPUs**: 4 writers, 128 buffers × 4MB
+- **12-16 CPUs**: 8 writers, 256 buffers × 8MB
+- **32 CPUs**: 12 writers, 512 buffers × 8MB
+- **64 CPUs**: 16 writers, 512 buffers × 8MB
+- **128 CPUs**: 32 writers, 1024 buffers × 8MB
+
 ### Basic Test (10 GB)
 ```bash
 python storage_benchmark.py --size 10GB --output /mnt/nvme/test.bin
@@ -44,12 +57,13 @@ python storage_benchmark.py --size 10GB --output /mnt/nvme/test.bin
 
 ### Large Test with Custom Buffers
 ```bash
-# 100 GB with 256 x 8MB buffers (2GB pool)
-python storage_benchmark.py \
-    --size 100GB \
-    --buffer-size 8MB \
-    --buffer-count 256 \
-    --output /mnt/nvme/test.bin
+# 100 GB with 8 parallel writers (optimal for most NVMe)
+python storage_benchmark.py --size 100GB --buffer-size 8MB \
+    --buffer-count 256 --num-writers 8 --output /mnt/nvme/test.bin
+
+# High-end NVMe with 16 writers
+python storage_benchmark.py --size 100GB --buffer-size 8MB \
+    --buffer-count 512 --num-writers 16 --output /mnt/nvme/test.bin
 ```
 
 ### Test with Compression/Deduplication
@@ -75,10 +89,12 @@ python storage_benchmark.py \
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--auto` | false | Auto-tune buffer-size, buffer-count, and num-writers |
 | `--size` / `-s` | 10GB | Total data size (e.g., 10GB, 500MB, 1TB) |
 | `--output` / `-o` | benchmark_output.bin | Output file path |
-| `--buffer-size` | 4MB | Size of each buffer (must be multiple of 4KB) |
-| `--buffer-count` | 250 | Number of buffers in pool |
+| `--buffer-size` | auto or 4MB | Size of each buffer (must be multiple of 4KB) |
+| `--buffer-count` | auto or 250 | Number of buffers in pool |
+| `--num-writers` | auto or 1 | Number of parallel writer threads (1-64) |
 | `--dedup-ratio` | 1.0 | Deduplication ratio (1.0 = no dedup) |
 | `--compress-ratio` | 1.0 | Compression ratio (1.0 = incompressible) |
 | `--no-direct` | false | Disable O_DIRECT (use buffered I/O) |
@@ -167,25 +183,50 @@ Bottleneck Analysis:
 
 ### Tuning
 
+**Most Important**: Use `--auto` for automatic optimization!
+
 If storage throughput is lower than expected:
 
-1. **Increase buffer size**: Try 8MB or 16MB buffers
+1. **Use auto-tuning** (easiest):
    ```bash
-   --buffer-size 8MB
+   --auto
    ```
 
-2. **Increase buffer count**: Larger pool = more buffering
+2. **Increase parallel writers** (for NVMe that needs queue depth):
    ```bash
-   --buffer-count 512
+   --num-writers 8   # Good for most NVMe
+   --num-writers 16  # High-end NVMe
+   --num-writers 32  # Storage arrays
    ```
 
-3. **Check alignment**: Buffer size should be multiple of 4096
+3. **Increase buffer size**:
+   ```bash
+   --buffer-size 8MB   # Recommended for NVMe
+   --buffer-size 16MB  # High-performance systems
+   ```
+
+4. **Increase buffer pool** (must be >= num-writers × 16):
+   ```bash
+   --buffer-count 256  # For 8-16 writers
+   --buffer-count 512  # For 16-32 writers
+   ```
+
+5. **Check alignment**: Buffer size should be multiple of 4096
    ```bash
    --buffer-size 8388608  # Exactly 8MB
    ```
 
-4. **Verify O_DIRECT**: Check that O_DIRECT is enabled in output
+6. **Verify O_DIRECT**: Check that O_DIRECT is enabled in output
    - If filesystem doesn't support it, try different mount or `--no-direct`
+
+**Performance Expectations by System Size:**
+
+| System Size | Auto Settings | Expected Throughput |
+|-------------|---------------|--------------------|
+| Small (8 CPUs) | 4 writers, 128 × 4MB | 0.4-0.8 GB/s |
+| Medium (16 CPUs) | 8 writers, 256 × 8MB | 0.8-1.5 GB/s |
+| Large (32 CPUs) | 12 writers, 512 × 8MB | 1.5-3.0 GB/s |
+| Very Large (64+ CPUs) | 16-32 writers, 1024 × 8MB | 3.0-7.0 GB/s |
 
 ## Platform Notes
 

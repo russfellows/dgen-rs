@@ -60,6 +60,42 @@ python python/examples/benchmark_cpu_numa.py
 
 ---
 
+### 3. storage_benchmark.py - Storage Performance Testing ⭐ NEW
+
+High-performance storage write benchmark with producer-consumer pipeline.
+
+```bash
+# Quick 1 GB test
+python python/examples/storage_benchmark.py --size 1GB --output /tmp/test.bin
+
+# NVMe performance test with O_DIRECT
+python python/examples/storage_benchmark.py --size 10GB --buffer-size 8MB \
+    --output /mnt/nvme/test.bin
+
+# Large test with compression/dedup
+python python/examples/storage_benchmark.py --size 100GB \
+    --compress-ratio 3.0 --dedup-ratio 2.0 --buffer-size 8MB \
+    --output /mnt/nvme/test.bin
+```
+
+**Features:**
+- Producer-consumer pipeline (generation + writes in parallel)
+- O_DIRECT support with automatic fallback
+- Page-aligned buffers for optimal NVMe performance
+- Detailed metrics: throughput, latency, utilization, bottleneck analysis
+- Clear ✓/⚠ indicators for O_DIRECT status
+
+**Output:**
+- Real-time progress updates
+- Storage throughput (GB/s)
+- Per-write latency statistics
+- Producer/consumer utilization analysis
+- Bottleneck identification
+
+See [STORAGE_BENCHMARK.md](STORAGE_BENCHMARK.md) for detailed documentation and [PERFORMANCE_GUIDE.md](PERFORMANCE_GUIDE.md) for optimization tips.
+
+---
+
 ## Example Output
 
 ### quick_perf_test.py

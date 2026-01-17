@@ -382,17 +382,15 @@ impl PyGenerator {
 
         let size = buf.len_bytes();
 
-        // Generate into temporary buffer
-        let mut temp = vec![0u8; size];
-        let written = self.inner.fill_chunk(&mut temp);
-
-        if written > 0 {
-            // Write to Python buffer (zero-copy)
+        // ZERO-COPY: Generate DIRECTLY into Python buffer without holding GIL
+        let written = py.detach(|| {
+            // Create mutable slice from Python buffer pointer
             unsafe {
                 let dst_ptr = buf.buf_ptr() as *mut u8;
-                std::ptr::copy_nonoverlapping(temp.as_ptr(), dst_ptr, written);
+                let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
+                self.inner.fill_chunk(dst_slice)
             }
-        }
+        });
 
         Ok(written)
     }

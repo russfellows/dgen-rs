@@ -463,6 +463,8 @@ pub struct DataGenerator {
     unique_blocks: usize,
     copy_lens: Vec<usize>,
     call_entropy: u64,
+    max_threads: usize,  // Thread count for parallel generation
+    thread_pool: Option<rayon::ThreadPool>,  // Reused thread pool (created once)
 }
 
 impl DataGenerator {
@@ -511,6 +513,34 @@ impl DataGenerator {
 
         let call_entropy = generate_call_entropy();
 
+        let max_threads = config.max_threads.unwrap_or_else(num_cpus::get);
+        
+        // Create thread pool ONCE for reuse (major performance optimization)
+        let thread_pool = if max_threads > 1 {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(max_threads)
+                .build()
+            {
+                Ok(pool) => {
+                    tracing::info!(
+                        "DataGenerator configured with {} threads (thread pool created)",
+                        max_threads
+                    );
+                    Some(pool)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create thread pool: {}, falling back to sequential",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::info!("DataGenerator configured for single-threaded operation");
+            None
+        };
+
         Self {
             total_size,
             current_pos: 0,
@@ -519,12 +549,17 @@ impl DataGenerator {
             unique_blocks,
             copy_lens,
             call_entropy,
+            max_threads,
+            thread_pool,
         }
     }
 
     /// Fill the next chunk of data
     ///
     /// Returns the number of bytes written. When this returns 0, generation is complete.
+    /// 
+    /// **Performance**: When buffer contains multiple blocks (>=8 MB), generation is parallelized
+    /// using rayon. Small buffers (<8 MB) use sequential generation to avoid threading overhead.
     pub fn fill_chunk(&mut self, buf: &mut [u8]) -> usize {
         tracing::trace!(
             "fill_chunk called: pos={}/{}, buf_len={}",
@@ -542,27 +577,47 @@ impl DataGenerator {
         let to_write = buf.len().min(remaining);
         let chunk = &mut buf[..to_write];
 
-        let mut offset = 0;
-        let mut blocks_generated = 0;
+        // Determine number of blocks to generate
+        let start_block = self.current_pos / BLOCK_SIZE;
+        let start_offset = self.current_pos % BLOCK_SIZE;
+        let end_pos = self.current_pos + to_write;
+        let end_block = (end_pos - 1) / BLOCK_SIZE;
+        let num_blocks = end_block - start_block + 1;
 
-        while offset < chunk.len() {
-            let block_idx = (self.current_pos + offset) / BLOCK_SIZE;
-            let block_offset = (self.current_pos + offset) % BLOCK_SIZE;
+        // Use parallel generation for large buffers (>=2 blocks), sequential for small
+        // This avoids rayon overhead for tiny chunks
+        const PARALLEL_THRESHOLD: usize = 2;
+        
+        if num_blocks >= PARALLEL_THRESHOLD && self.max_threads > 1 {
+            // PARALLEL PATH: Generate all blocks in parallel
+            self.fill_chunk_parallel(chunk, start_block, start_offset, num_blocks)
+        } else {
+            // SEQUENTIAL PATH: Generate blocks one at a time (small buffers or single-threaded)
+            self.fill_chunk_sequential(chunk, start_block, start_offset, num_blocks)
+        }
+    }
+
+    /// Sequential fill for small buffers
+    #[inline]
+    fn fill_chunk_sequential(
+        &mut self,
+        chunk: &mut [u8],
+        start_block: usize,
+        start_offset: usize,
+        num_blocks: usize,
+    ) -> usize {
+        let mut offset = 0;
+
+        for i in 0..num_blocks {
+            let block_idx = start_block + i;
+            let block_offset = if i == 0 { start_offset } else { 0 };
             let remaining_in_block = BLOCK_SIZE - block_offset;
             let to_copy = remaining_in_block.min(chunk.len() - offset);
-
-            tracing::trace!(
-                "  block_idx={}, block_offset={}, to_copy={}",
-                block_idx,
-                block_offset,
-                to_copy
-            );
 
             // Map to unique block
             let ub = block_idx % self.unique_blocks;
 
-            // Generate full block (WARNING: This is inefficient for small chunks!)
-            // TODO: Cache blocks or use a more efficient streaming approach
+            // Generate full block
             let mut block_buf = vec![0u8; BLOCK_SIZE];
             fill_block(
                 &mut block_buf,
@@ -570,7 +625,6 @@ impl DataGenerator {
                 self.copy_lens[ub].min(BLOCK_SIZE),
                 self.call_entropy,
             );
-            blocks_generated += 1;
 
             // Copy needed portion
             chunk[offset..offset + to_copy]
@@ -579,14 +633,77 @@ impl DataGenerator {
             offset += to_copy;
         }
 
+        let to_write = offset;
+        self.current_pos += to_write;
+        
         tracing::debug!(
-            "fill_chunk generated {} blocks ({} MiB) for {} byte chunk",
-            blocks_generated,
-            blocks_generated * 4,
+            "fill_chunk_sequential: generated {} blocks ({} MiB) for {} byte chunk",
+            num_blocks,
+            num_blocks * 4,
             to_write
         );
+        
+        to_write
+    }
 
+    /// Parallel fill for large buffers (uses reused thread pool - ZERO COPY)
+    fn fill_chunk_parallel(
+        &mut self,
+        chunk: &mut [u8],
+        start_block: usize,
+        start_offset: usize,
+        num_blocks: usize,
+    ) -> usize {
+        use rayon::prelude::*;
+
+        // Use stored thread pool if available, otherwise fall back to sequential
+        let thread_pool = match &self.thread_pool {
+            Some(pool) => pool,
+            None => {
+                // No thread pool - fall back to sequential
+                return self.fill_chunk_sequential(chunk, start_block, start_offset, num_blocks);
+            }
+        };
+
+        let call_entropy = self.call_entropy;
+        let copy_lens = &self.copy_lens;
+        let unique_blocks = self.unique_blocks;
+
+        // ZERO-COPY: Generate directly into output buffer using par_chunks_mut
+        // This is the same approach as generate_data() - no temporary allocations!
+        thread_pool.install(|| {
+            chunk
+                .par_chunks_mut(BLOCK_SIZE)
+                .enumerate()
+                .for_each(|(i, block_chunk)| {
+                    let block_idx = start_block + i;
+                    let ub = block_idx % unique_blocks;
+                    
+                    // Handle first block with offset
+                    if i == 0 && start_offset > 0 {
+                        // Generate full block into temp, copy needed portion
+                        let mut temp = vec![0u8; BLOCK_SIZE];
+                        fill_block(&mut temp, ub, copy_lens[ub].min(BLOCK_SIZE), call_entropy);
+                        let copy_len = BLOCK_SIZE.saturating_sub(start_offset).min(block_chunk.len());
+                        block_chunk[..copy_len].copy_from_slice(&temp[start_offset..start_offset + copy_len]);
+                    } else {
+                        // Generate directly into output buffer (ZERO-COPY!)
+                        let actual_len = block_chunk.len().min(BLOCK_SIZE);
+                        fill_block(&mut block_chunk[..actual_len], ub, copy_lens[ub].min(actual_len), call_entropy);
+                    }
+                });
+        });
+
+        let to_write = chunk.len();
         self.current_pos += to_write;
+        
+        tracing::debug!(
+            "fill_chunk_parallel: ZERO-COPY generated {} blocks ({} MiB) for {} byte chunk",
+            num_blocks,
+            num_blocks * 4,
+            to_write
+        );
+        
         to_write
     }
 

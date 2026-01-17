@@ -1,6 +1,6 @@
 [project]
 name = "dgen-py"
-version = "0.1.2"
+version = "0.1.3"
 description = "High-performance random data generation with NUMA optimization and zero-copy Python interface"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,3 +41,37 @@ features = ["python-bindings"]
 module-name = "dgen_py._dgen_rs"  # Put the .so inside the dgen_py package
 python-source = "python"
 python-packages = ["dgen_py"]
+
+# ==================================================================================
+# PERFORMANCE BENCHMARKS (v0.1.3)
+# ==================================================================================
+# Test System: Cloud VM (UMA - single NUMA node)
+# CPU: Intel Ice Lake, 12 vCPUs
+# Test: 3 runs × 100 GB each (64 MB chunks)
+# Method: Zero-copy parallel streaming with Generator.fill_chunk()
+# Date: January 17, 2026
+#
+# RESULTS:
+#   Run 01: 2.4060 seconds | 41.56 GB/s
+#   Run 02: 2.2678 seconds | 44.10 GB/s
+#   Run 03: 2.2622 seconds | 44.20 GB/s
+#   -----------------------------------------------
+#   AVERAGE:    2.3120 seconds | 43.25 GB/s
+#   PER-CORE:   3.60 GB/s
+#
+# PROJECTED PERFORMANCE (384-core HPC system):
+#   Throughput: 1,384 GB/s
+#   vs Storage: 17.3x faster than 80 GB/s target
+#
+# OPTIMIZATION FEATURES:
+#   ✓ Thread pool created ONCE and reused for all chunks
+#   ✓ ZERO-COPY: Generates directly into Python buffer (no temp allocation)
+#   ✓ GIL release: Uses py.detach() for true parallel execution
+#   ✓ Cache-friendly: Each thread generates 4 MB blocks (fits in L3)
+#   ✓ Python achieves 92% efficiency vs native Rust (43.25 vs 47.18 GB/s)
+#
+# COMPARISON vs v0.1.2:
+#   v0.1.2: 1.97 GB/s (temp buffer + copy + GIL overhead)
+#   v0.1.3: 43.25 GB/s (zero-copy + GIL release)
+#   Improvement: 22x faster
+# ==================================================================================

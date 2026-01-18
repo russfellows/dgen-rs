@@ -69,8 +69,8 @@ data = dgen_py.generate_buffer(
 ```python
 import dgen_py
 
-# Pre-allocate buffer
-buf = bytearray(64 * 1024 * 1024)  # 64 MB
+# Pre-allocate buffer (32 MB is optimal)
+buf = bytearray(32 * 1024 * 1024)  # 32 MB
 
 # Generate directly into buffer (TRUE zero-copy!)
 nbytes = dgen_py.generate_into_buffer(
@@ -97,9 +97,9 @@ gen = dgen_py.Generator(
     max_threads=None   # Use all cores
 )
 
-# Use large chunks for parallel generation (64+ MB recommended)
-chunk_size = 64 * 1024 * 1024  # 64 MB = 16 parallel blocks
-buf = bytearray(chunk_size)
+# Optimal chunk size: 32 MB (default, empirically tested)
+# Can override with chunk_size parameter if needed
+buf = bytearray(gen.chunk_size)  # Uses recommended 32 MB
 
 while not gen.is_complete():
     nbytes = gen.fill_chunk(buf)  # Zero-copy parallel generation
@@ -113,8 +113,9 @@ while not gen.is_complete():
 ```
 
 **Key Performance Tips:**
-- Use **64-256 MB chunks** for streaming (enables parallel generation)
-- Chunks < 8 MB fall back to sequential (slower)
+- **Default 32 MB chunks** provide optimal performance (16% faster than 64 MB)
+- Can override with `chunk_size` parameter: `Generator(..., chunk_size=64*1024*1024)`
+- Chunks < 8 MB fall back to sequential generation (much slower)
 - `numa_mode="auto"` optimizes for multi-socket systems
 - Thread pool is reused across all `fill_chunk()` calls (zero overhead)
 

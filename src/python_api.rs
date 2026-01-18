@@ -173,6 +173,7 @@ fn generate_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
+        numa_node: None,
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
@@ -259,6 +260,7 @@ fn generate_into_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
+        numa_node: None,
     };
 
     // Generate data
@@ -307,6 +309,7 @@ fn generate_into_buffer(
 #[pyclass(name = "Generator")]
 struct PyGenerator {
     inner: DataGenerator,
+    chunk_size: usize,  // Recommended chunk size for fill_chunk() calls
 }
 
 #[pymethods]
@@ -319,14 +322,18 @@ impl PyGenerator {
     /// * `compress_ratio` - Compression ratio
     /// * `numa_mode` - NUMA mode: "auto", "force", or "disabled" (default: "auto")
     /// * `max_threads` - Maximum threads to use (None = use all cores)
+    /// * `numa_node` - Pin to specific NUMA node (None = use all nodes, 0-N = specific node)
+    /// * `chunk_size` - Chunk size for streaming (default: 32 MB for optimal performance)
     #[new]
-    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None))]
+    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None))]
     fn new(
         size: usize,
         dedup_ratio: f64,
         compress_ratio: f64,
         numa_mode: &str,
         max_threads: Option<usize>,
+        numa_node: Option<usize>,
+        chunk_size: Option<usize>,
     ) -> PyResult<Self> {
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
@@ -350,11 +357,21 @@ impl PyGenerator {
             compress_factor: compress,
             numa_mode: numa,
             max_threads,
+            numa_node,
         };
+
+        let chunk_size = chunk_size.unwrap_or_else(DataGenerator::recommended_chunk_size);
 
         Ok(Self {
             inner: DataGenerator::new(config),
+            chunk_size,
         })
+    }
+
+    /// Get recommended chunk size for optimal performance (32 MB)
+    #[getter]
+    fn chunk_size(&self) -> usize {
+        self.chunk_size
     }
 
     /// Fill the next chunk of data

@@ -133,12 +133,6 @@ else:
     print(f"64 MB is {-improvement:.1f}% faster than 32 MB")
 print()
 
-print("EXPECTED ON 384-CORE HPC:")
-expected_hpc = avg_throughput / info['physical_cores'] * 384
-print(f"  Projected throughput: {expected_hpc:.0f} GB/s")
-print(f"  Storage target: 80 GB/s")
-print(f"  Headroom: {expected_hpc / 80:.1f}x faster than storage")
-print()
 print("OPTIMIZATION NOTES:")
 print("  - Thread pool created ONCE and reused")
 print("  - ZERO-COPY: Generates directly into output buffer")

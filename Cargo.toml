@@ -23,7 +23,7 @@ bytes = "^1.10"  # Zero-copy buffer type for Python integration
 pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 
 # NUMA topology detection and thread pinning
-hwloc2 = { version = "2.2", optional = true }
+hwlocality = { version = "1.0.0-alpha.11", optional = true }
 core_affinity = { version = "0.8", optional = true }
 num_cpus = "1.16"  # Required for NUMA detection
 
@@ -42,7 +42,7 @@ tempfile = "3.20"
 [features]
 default = ["python-bindings", "numa", "thread-pinning"]
 python-bindings = ["pyo3"]
-numa = ["hwloc2"]
+numa = ["hwlocality"]
 thread-pinning = ["core_affinity"]
 
 [profile.release]

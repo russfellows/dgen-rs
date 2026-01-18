@@ -4,13 +4,12 @@
 
 //! Zero-copy Python bindings using PyO3 buffer protocol
 
-use bytes::Bytes;
 use pyo3::buffer::PyBuffer;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::generator::{generate_data, DataGenerator, GeneratorConfig, NumaMode};
+use crate::generator::{generate_data, DataBuffer, DataGenerator, GeneratorConfig, NumaMode};
 
 #[cfg(feature = "numa")]
 use crate::numa::NumaTopology;
@@ -19,33 +18,34 @@ use crate::numa::NumaTopology;
 // Zero-Copy Buffer Support
 // =============================================================================
 
-/// A Python-visible wrapper around bytes::Bytes that exposes buffer protocol.
+/// A Python-visible wrapper around DataBuffer (UMA or NUMA) that exposes buffer protocol.
 /// This allows Python code to get a memoryview without copying data.
 ///
-/// Implements the Python buffer protocol via __getbuffer__ and __releasebuffer__
-/// so that `memoryview(data)` works directly with zero-copy access.
+/// ZERO-COPY: Python accesses the NUMA-allocated memory directly via raw pointer!
 #[pyclass(name = "BytesView")]
 pub struct PyBytesView {
-    /// The underlying Bytes (reference-counted, cheap to clone)
-    bytes: Bytes,
+    /// The underlying DataBuffer (Vec for UMA, hwlocality Bytes for NUMA)
+    buffer: DataBuffer,
 }
 
 #[pymethods]
 impl PyBytesView {
     /// Get the length of the data
     fn __len__(&self) -> usize {
-        self.bytes.len()
+        self.buffer.len()
     }
 
     /// Support bytes() conversion - returns a copy
     fn __bytes__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.bytes)
+        PyBytes::new(py, self.buffer.as_slice())
     }
 
     /// Implement Python buffer protocol for zero-copy access.
     /// This allows `memoryview(data)` to work directly.
     ///
     /// The buffer is read-only; requesting a writable buffer will raise BufferError.
+    /// 
+    /// ZERO-COPY: Python accesses NUMA memory directly via raw pointer!
     unsafe fn __getbuffer__(
         slf: PyRef<'_, Self>,
         view: *mut ffi::Py_buffer,
@@ -58,12 +58,14 @@ impl PyBytesView {
             ));
         }
 
-        let bytes = &slf.bytes;
+        let buffer = &slf.buffer;
+        let len = buffer.len();
+        let ptr = buffer.as_ptr();
 
-        // Fill in the Py_buffer struct
+        // Fill in the Py_buffer struct with DataBuffer's raw pointer
         unsafe {
-            (*view).buf = bytes.as_ptr() as *mut std::os::raw::c_void;
-            (*view).len = bytes.len() as isize;
+            (*view).buf = ptr as *mut std::os::raw::c_void;
+            (*view).len = len as isize;
             (*view).readonly = 1;
             (*view).itemsize = 1;
 
@@ -94,7 +96,8 @@ impl PyBytesView {
             (*view).internal = std::ptr::null_mut();
 
             // CRITICAL: Store a reference to the PyBytesView object
-            // This prevents the Bytes data from being deallocated while the buffer is in use
+            // This prevents the DataBuffer (Vec or NUMA Bytes) from being deallocated
+            // while the Python memoryview is in use
             // Note: Cast is intentionally explicit for PyO3 FFI compatibility across versions
             #[allow(clippy::unnecessary_cast)]
             {
@@ -107,10 +110,10 @@ impl PyBytesView {
     }
 
     /// Release the buffer - called when the memoryview is garbage collected.
-    /// We don't need to do anything here since the Bytes is reference-counted.
+    /// Python decrefs view.obj which will eventually drop the PyBytesView and DataBuffer
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
         // Nothing to do - the Py_DECREF on view.obj will be handled by Python
-        // and will eventually drop the PyBytesView (and thus the Bytes) when refcount hits 0
+        // and will eventually drop the PyBytesView (and thus the DataBuffer) when refcount hits 0
     }
 }
 
@@ -140,7 +143,7 @@ impl PyBytesView {
 /// print(f"Generated {len(data)} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None))]
+#[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
 fn generate_buffer(
     py: Python<'_>,
     size: usize,
@@ -148,6 +151,7 @@ fn generate_buffer(
     compress_ratio: f64,
     numa_mode: &str,
     max_threads: Option<usize>,
+    numa_node: Option<usize>,
 ) -> PyResult<Py<PyBytesView>> {
     // Convert ratios to integer factors
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
@@ -173,17 +177,16 @@ fn generate_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
-        numa_node: None,
+        numa_node,  // CRITICAL: Use the parameter to bind to specific NUMA node
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
+    // Returns DataBuffer (either UMA Vec<u8> or NUMA hwlocality Bytes)
     let data = py.detach(|| generate_data(config));
 
-    // Convert Vec<u8> to Bytes (cheap, just wraps the Vec's heap allocation)
-    let bytes = Bytes::from(data);
-
-    // Return BytesView - Python can use memoryview() for TRUE zero-copy access
-    Py::new(py, PyBytesView { bytes })
+    // Return PyBytesView with DataBuffer directly - ZERO COPY!
+    // Python accesses the memory via memoryview() using raw pointer from DataBuffer
+    Py::new(py, PyBytesView { buffer: data })
 }
 
 /// Generate data using Python buffer protocol (for writing into existing buffer)
@@ -211,17 +214,17 @@ fn generate_buffer(
 /// print(f"Wrote {nbytes} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None))]
+#[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
 fn generate_into_buffer(
-    py: Python<'_>,
-    buffer: Py<PyAny>,
+    buffer: &Bound<'_, PyAny>,
     dedup_ratio: f64,
     compress_ratio: f64,
     numa_mode: &str,
     max_threads: Option<usize>,
+    numa_node: Option<usize>,
 ) -> PyResult<usize> {
     // Get buffer via PyBuffer protocol
-    let buf: PyBuffer<u8> = PyBuffer::get(buffer.bind(py))?;
+    let buf: PyBuffer<u8> = PyBuffer::get(buffer)?;
 
     // Ensure buffer is writable and contiguous
     if buf.readonly() {
@@ -260,7 +263,7 @@ fn generate_into_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
-        numa_node: None,
+        numa_node,  // CRITICAL: Bind to specific NUMA node if specified
     };
 
     // Generate data
@@ -435,9 +438,9 @@ impl PyGenerator {
             Ok(None)
         } else {
             chunk.truncate(written);
-            // Convert to Bytes for zero-copy Python access
-            let bytes = Bytes::from(chunk);
-            Ok(Some(Py::new(py, PyBytesView { bytes })?))
+            // Wrap in DataBuffer::Uma for zero-copy Python access
+            let buffer = DataBuffer::Uma(chunk);
+            Ok(Some(Py::new(py, PyBytesView { buffer })?))
         }
     }
 

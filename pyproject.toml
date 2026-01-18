@@ -43,35 +43,43 @@ python-source = "python"
 python-packages = ["dgen_py"]
 
 # ==================================================================================
-# PERFORMANCE BENCHMARKS (v0.1.3)
+# PERFORMANCE BENCHMARKS (v0.1.3 - Multi-Process NUMA)
 # ==================================================================================
-# Test System: Cloud VM (UMA - single NUMA node)
-# CPU: Intel Ice Lake, 12 vCPUs
-# Test: 3 runs × 100 GB each (64 MB chunks)
-# Method: Zero-copy parallel streaming with Generator.fill_chunk()
-# Date: January 17, 2026
+# Benchmark: 1024 GB total (incompressible), multi-process NUMA architecture
+# Method: One Python process per NUMA node, local memory allocation, local cores
+# Date: January 18, 2026
 #
-# RESULTS:
-#   Run 01: 2.4060 seconds | 41.56 GB/s
-#   Run 02: 2.2678 seconds | 44.10 GB/s
-#   Run 03: 2.2622 seconds | 44.20 GB/s
-#   -----------------------------------------------
-#   AVERAGE:    2.3120 seconds | 43.25 GB/s
-#   PER-CORE:   3.60 GB/s
+# SCALING RESULTS:
 #
-# PROJECTED PERFORMANCE (384-core HPC system):
-#   Throughput: 1,384 GB/s
-#   vs Storage: 17.3x faster than 80 GB/s target
+#   System          Cores  NUMA   Aggregate      Per-Core   Efficiency
+#   --------------  -----  -----  -------------  ---------  ----------
+#   GCP C4-16         16     1    39.87 GB/s     2.49 GB/s    100% (baseline)
+#   GCP C4-96         96     4   126.96 GB/s     1.32 GB/s     53%
+#   Azure HBv5       368    16   188.24 GB/s     0.51 GB/s     20%
 #
-# OPTIMIZATION FEATURES:
-#   ✓ Thread pool created ONCE and reused for all chunks
-#   ✓ ZERO-COPY: Generates directly into Python buffer (no temp allocation)
-#   ✓ GIL release: Uses py.detach() for true parallel execution
-#   ✓ Cache-friendly: Each thread generates 4 MB blocks (fits in L3)
-#   ✓ Python achieves 92% efficiency vs native Rust (43.25 vs 47.18 GB/s)
+# KEY FINDINGS:
+#   • Sub-linear scaling is EXPECTED for memory-intensive workloads
+#   • Memory bandwidth becomes bottleneck as core count increases
+#   • All systems EXCEED 80 GB/s storage testing requirement
+#   • C4-96 offers best efficiency/throughput balance (126.96 GB/s at 53%)
+#   • HBv5 achieves maximum throughput (188.24 GB/s = 2.4x storage target)
 #
-# COMPARISON vs v0.1.2:
-#   v0.1.2: 1.97 GB/s (temp buffer + copy + GIL overhead)
-#   v0.1.3: 43.25 GB/s (zero-copy + GIL release)
-#   Improvement: 22x faster
+# NUMA ARCHITECTURE:
+#   • Multi-process: 1 Python process per NUMA node
+#   • Local allocation: Each process allocates buffer on LOCAL node
+#   • Local cores: Each process uses ONLY cores from LOCAL node  
+#   • Zero cross-node traffic: No remote memory access
+#   • True zero-copy: Python memoryview accesses Rust memory via raw pointer
+#
+# PER-NODE PERFORMANCE (C4-96, 4 NUMA nodes):
+#   Node 0: 32.49 GB/s  |  Node 2: 32.20 GB/s
+#   Node 1: 31.74 GB/s  |  Node 3: 32.64 GB/s
+#   Balance: ±1.4% variation (excellent)
+#
+# STORAGE BENCHMARKING GUIDANCE:
+#   Target < 40 GB/s:     Use UMA systems (16-32 cores)
+#   Target 40-130 GB/s:   Use NUMA systems (64-96 cores) 
+#   Target 130-200 GB/s:  Use large NUMA (368+ cores)
+#
+# See docs/PERFORMANCE_SCALING.md for detailed analysis
 # ==================================================================================

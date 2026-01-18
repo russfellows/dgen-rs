@@ -29,6 +29,39 @@
 - Expected throughput: 1,384-1,500 GB/s
 - Perfect for high-speed storage testing (easily exceeds 80 GB/s targets)
 
+## System Requirements
+
+### Runtime Dependencies
+
+No runtime dependencies for basic UMA (non-NUMA) usage.
+
+### NUMA Support (Optional)
+
+For NUMA-aware allocation and optimization, the following system libraries are required:
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install libudev-dev libhwloc-dev
+```
+
+**RHEL/CentOS/Fedora:**
+```bash
+sudo yum install systemd-devel hwloc-devel
+```
+
+**macOS:**
+```bash
+brew install hwloc
+```
+
+**Note**: Without these libraries, the NUMA feature will not compile. The library will fall back to UMA (uniform memory access) mode, which still provides excellent performance on single-socket systems.
+
+### Build Dependencies
+
+- **Rust**: 1.90 or later
+- **Python**: 3.10 or later (for Python bindings)
+- **maturin**: `pip install maturin` (for building Python wheels)
+
 ## Quick Start
 
 ### Python Installation

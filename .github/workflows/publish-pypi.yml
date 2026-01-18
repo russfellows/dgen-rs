@@ -27,9 +27,12 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter
           sccache: 'true'
-          manylinux: auto
+          manylinux: '2_28'
           before-script-linux: |
-            yum install -y hwloc-devel
+            # Install hwloc development libraries (AlmaLinux 8)
+            dnf install -y hwloc-devel
+            # Verify installation
+            pkg-config --exists hwloc && echo "hwloc found via pkg-config" || echo "hwloc NOT found"
       
       - name: Upload wheels
         uses: actions/upload-artifact@v4

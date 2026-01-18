@@ -2,6 +2,8 @@
 
 High-performance storage write benchmark using dgen-py with producer-consumer pipeline.
 
+**⚠️ Performance Note**: This streaming benchmark achieves 0.75-0.80 GB/s due to Python loop overhead (see [STREAMING_PERFORMANCE_ISSUE.md](STREAMING_PERFORMANCE_ISSUE.md)). For maximum performance (1.26+ GB/s), files must fit in RAM using `single_buffer_benchmark.py`, or wait for future `dgen_py.write_file()` Rust implementation.
+
 ## Overview
 
 This example demonstrates how to use dgen-py to create a storage benchmark that:

@@ -84,6 +84,13 @@ python python/examples/storage_benchmark.py --size 100GB \
 - Page-aligned buffers for optimal NVMe performance
 - Detailed metrics: throughput, latency, utilization, bottleneck analysis
 - Clear ✓/⚠ indicators for O_DIRECT status
+- **Performance**: 0.75-0.80 GB/s (limited by Python overhead, see below)
+
+**Alternative Benchmarks:**
+- `single_buffer_benchmark.py` - Achieves 1.26 GB/s by pre-generating all data (requires file size in RAM)
+- `iouring_benchmark.py` - Linux io_uring implementation (similar performance to threading version)
+
+**⚠️ Known Limitation**: Streaming mode is limited to 0.75-0.80 GB/s due to Python loop overhead, even though storage can handle 1.26+ GB/s. See [STREAMING_PERFORMANCE_ISSUE.md](STREAMING_PERFORMANCE_ISSUE.md) for analysis and proposed Rust-based solution.
 
 **Output:**
 - Real-time progress updates

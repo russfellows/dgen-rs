@@ -572,14 +572,18 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkStats:
     else:
         print(f"  → Page cache used (results may not reflect true storage speed)")
     
+    print(f"\n⭐ STORAGE WRITE PERFORMANCE:")
+    print(f"   {stats.write_throughput_gbps:.2f} GB/s")
+    print(f"   (Data written: {stats.bytes_written / 1e9:.2f} GB in {stats.total_time:.2f}s)")
+    
     print(f"\nData Transfer:")
     print(f"  Generated:       {stats.bytes_generated / 1e9:.2f} GB")
     print(f"  Written:         {stats.bytes_written / 1e9:.2f} GB")
     print(f"  Total time:      {stats.total_time:.2f} s")
     
-    print(f"\nThroughput:")
-    print(f"  Write:           {stats.write_throughput_gbps:.2f} GB/s")
-    print(f"  Generation:      {stats.generation_throughput_gbps:.2f} GB/s")
+    print(f"\nThroughput Breakdown:")
+    print(f"  Write:           {stats.write_throughput_gbps:.2f} GB/s (storage performance)")
+    print(f"  Generation:      {stats.generation_throughput_gbps:.2f} GB/s (overhead, not counted)")
     
     print(f"\nLatency:")
     print(f"  Avg write:       {stats.avg_write_latency_ms:.2f} ms")

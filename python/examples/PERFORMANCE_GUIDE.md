@@ -75,9 +75,19 @@ os.write(fd, buf)     # I/O syscall - RELEASES GIL
 
 ## Question 3: Performance Optimization Strategies ⭐ UPDATED
 
+### ⚠️ Known Limitation: Streaming Performance Gap
+
+**Critical Finding (Jan 2026)**: Streaming mode achieves only **0.75-0.80 GB/s** versus **1.26-1.38 GB/s** with single-buffer writes due to Python loop overhead. This is a fundamental limitation when writing files larger than available RAM.
+
+**Root Cause**: Python loop overhead and memory contention between generation and I/O operations. Even with threading and io_uring, Python cannot achieve full parallelism.
+
+**Proposed Solution**: Add `dgen_py.write_file()` Rust function that performs both generation and writing entirely in Rust, eliminating Python overhead. See [STREAMING_PERFORMANCE_ISSUE.md](STREAMING_PERFORMANCE_ISSUE.md) for details.
+
+**Current Workaround**: For files that fit in RAM, use single-buffer approach (achieves 1.26 GB/s). For larger files, accept 0.75-0.80 GB/s with streaming mode.
+
 ### Multi-Writer Breakthrough (NEW!)
 
-**Major Update**: Added multi-writer support for **33-50% throughput improvement**!
+**Major Update**: Added multi-writer support for **33-50% throughput improvement within streaming limitations**!
 
 **Test Results on 12-CPU System:**
 

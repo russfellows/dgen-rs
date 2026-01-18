@@ -1,6 +1,6 @@
 [project]
 name = "dgen-py"
-version = "0.1.2"
+version = "0.1.3"
 description = "High-performance random data generation with NUMA optimization and zero-copy Python interface"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,3 +41,45 @@ features = ["python-bindings"]
 module-name = "dgen_py._dgen_rs"  # Put the .so inside the dgen_py package
 python-source = "python"
 python-packages = ["dgen_py"]
+
+# ==================================================================================
+# PERFORMANCE BENCHMARKS (v0.1.3 - Multi-Process NUMA)
+# ==================================================================================
+# Benchmark: 1024 GB total (incompressible), multi-process NUMA architecture
+# Method: One Python process per NUMA node, local memory allocation, local cores
+# Date: January 18, 2026
+#
+# SCALING RESULTS:
+#
+#   System          Cores  NUMA   Aggregate      Per-Core   Efficiency
+#   --------------  -----  -----  -------------  ---------  ----------
+#   GCP C4-16         16     1    39.87 GB/s     2.49 GB/s    100% (baseline)
+#   GCP C4-96         96     4   126.96 GB/s     1.32 GB/s     53%
+#   Azure HBv5       368    16   188.24 GB/s     0.51 GB/s     20%
+#
+# KEY FINDINGS:
+#   • Sub-linear scaling is EXPECTED for memory-intensive workloads
+#   • Memory bandwidth becomes bottleneck as core count increases
+#   • All systems EXCEED 80 GB/s storage testing requirement
+#   • C4-96 offers best efficiency/throughput balance (126.96 GB/s at 53%)
+#   • HBv5 achieves maximum throughput (188.24 GB/s = 2.4x storage target)
+#
+# NUMA ARCHITECTURE:
+#   • Multi-process: 1 Python process per NUMA node
+#   • Local allocation: Each process allocates buffer on LOCAL node
+#   • Local cores: Each process uses ONLY cores from LOCAL node  
+#   • Zero cross-node traffic: No remote memory access
+#   • True zero-copy: Python memoryview accesses Rust memory via raw pointer
+#
+# PER-NODE PERFORMANCE (C4-96, 4 NUMA nodes):
+#   Node 0: 32.49 GB/s  |  Node 2: 32.20 GB/s
+#   Node 1: 31.74 GB/s  |  Node 3: 32.64 GB/s
+#   Balance: ±1.4% variation (excellent)
+#
+# STORAGE BENCHMARKING GUIDANCE:
+#   Target < 40 GB/s:     Use UMA systems (16-32 cores)
+#   Target 40-130 GB/s:   Use NUMA systems (64-96 cores) 
+#   Target 130-200 GB/s:  Use large NUMA (368+ cores)
+#
+# See docs/PERFORMANCE_SCALING.md for detailed analysis
+# ==================================================================================

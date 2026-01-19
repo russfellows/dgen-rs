@@ -16,6 +16,11 @@ crate-type = ["cdylib", "rlib"]  # cdylib for Python bindings, rlib for Rust usa
 name = "streaming-bench"
 path = "benches/streaming_throughput.rs"
 
+[[example]]
+name = "numa-test"
+path = "examples/numa_test.rs"
+required-features = ["numa"]
+
 [dependencies]
 # RNG and data generation
 rand = { version = "0.9", features = ["std", "alloc"] }

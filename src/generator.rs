@@ -6,7 +6,7 @@
 //!
 //! Ported from s3dlio/src/data_gen_alt.rs with NUMA optimizations
 
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -617,14 +617,32 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
 
 /// Fill a single block with controlled compression
 ///
-/// # Algorithm
-/// 1. Fill entire block with Xoshiro256++ keystream
-/// 2. Add local back-references to achieve target compressibility
+/// # Algorithm (OPTIMIZED January 2026)
+/// 
+/// **NEW METHOD (Current)**: Zero-fill for compression
+/// 1. Fill incompressible portion with Xoshiro256++ keystream (high-entropy random data)
+/// 2. Fill compressible portion with zeros (memset - extremely fast)
+/// 
+/// **OLD METHOD (Before Jan 2026)**: Back-reference approach
+/// - Filled entire block with RNG data
+/// - Created back-references using copy_within() in 64-256 byte chunks
+/// - SLOW: Required 2x memory traffic (write all, then copy 50% for 2:1 compression)
+/// - Example: 1 MB block @ 2:1 ratio = 1 MB RNG write + 512 KB of copy_within operations
+/// 
+/// **WHY CHANGED**: 
+/// - Testing showed significant slowdown with compression enabled (1-4 GB/s vs 15 GB/s)
+/// - Back-references created small, inefficient memory copies
+/// - Zero-fill approach matches DLIO benchmark methodology
+/// - Much faster: memset is highly optimized (often CPU instruction or libc fast path)
+/// 
+/// **PERFORMANCE COMPARISON**:
+/// - Incompressible (copy_len=0): ~15 GB/s per core (both methods identical)
+/// - 2:1 compression (copy_len=50%): OLD ~2-4 GB/s, NEW ~10-12 GB/s (estimated)
 ///
 /// # Parameters
 /// - `out`: Output buffer (BLOCK_SIZE bytes)
 /// - `unique_block_idx`: Index of unique block (for RNG seeding)
-/// - `copy_len`: Target bytes to make compressible
+/// - `copy_len`: Target bytes to make compressible (filled with zeros)
 /// - `call_entropy`: Per-call RNG seed
 fn fill_block(out: &mut [u8], unique_block_idx: usize, copy_len: usize, call_entropy: u64) {
     tracing::trace!(
@@ -638,52 +656,40 @@ fn fill_block(out: &mut [u8], unique_block_idx: usize, copy_len: usize, call_ent
     let seed = call_entropy ^ ((unique_block_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
-    // Step 1: Fill with high-entropy keystream
-    tracing::trace!("Filling {} bytes with RNG keystream", out.len());
-    rng.fill_bytes(out);
+    // OPTIMIZED COMPRESSION METHOD (January 2026):
+    // For compress_factor N:1 ratio, we want (N-1)/N of the block to be compressible
+    // Example: 2:1 ratio means 50% compressible, 4:1 means 75% compressible
+    //
+    // Strategy: Fill incompressible portion with RNG, compressible portion with zeros
+    // This is MUCH faster than the old back-reference approach
 
-    // Step 2: Add local back-references for compression
-    if copy_len == 0 || out.len() <= 1 {
-        return;
+    if copy_len == 0 {
+        // No compression: fill entire block with high-entropy random data
+        tracing::trace!("Filling {} bytes with RNG keystream (incompressible)", out.len());
+        rng.fill_bytes(out);
+    } else {
+        // With compression: split between random and zeros
+        let incompressible_len = out.len().saturating_sub(copy_len);
+        
+        tracing::trace!(
+            "Filling block: {} bytes random (incompressible) + {} bytes zeros (compressible)",
+            incompressible_len,
+            copy_len
+        );
+        
+        // Step 1: Fill incompressible portion with high-entropy keystream
+        if incompressible_len > 0 {
+            rng.fill_bytes(&mut out[..incompressible_len]);
+        }
+        
+        // Step 2: Fill compressible portion with zeros (memset - super fast!)
+        // This is typically optimized to a CPU instruction or fast libc call
+        if copy_len > 0 && incompressible_len < out.len() {
+            out[incompressible_len..].fill(0);
+        }
     }
-
-    let mut made = 0usize;
-    while made < copy_len {
-        let remaining = copy_len.saturating_sub(made);
-        if remaining == 0 {
-            break;
-        }
-
-        // Choose run length: 64-256 bytes
-        let run_len = rng
-            .random_range(MIN_RUN_LENGTH..=MAX_RUN_LENGTH)
-            .min(remaining)
-            .min(out.len() - 1);
-        if run_len == 0 {
-            break;
-        }
-
-        // Choose destination position
-        if out.len() <= run_len {
-            break;
-        }
-        let dst = rng.random_range(0..(out.len() - run_len));
-
-        // Choose source position (back-reference)
-        let max_back = dst.clamp(1, MAX_BACK_REF_DISTANCE);
-        let back = rng.random_range(1..=max_back);
-        let src = dst.saturating_sub(back);
-
-        // Safety check
-        if src + run_len > out.len() {
-            break;
-        }
-
-        // Copy within block (handles overlaps)
-        out.copy_within(src..(src + run_len), dst);
-        made += run_len;
-    }
-    tracing::trace!("fill_block complete: made {} compressible bytes", made);
+    
+    tracing::trace!("fill_block complete: {} compressible bytes (zeros)", copy_len);
 }
 
 /// Generate per-call entropy from time + urandom

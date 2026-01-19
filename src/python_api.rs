@@ -125,21 +125,24 @@ impl PyBytesView {
 ///
 /// # Arguments
 /// * `size` - Total bytes to generate
-/// * `dedup_ratio` - Deduplication ratio (1.0 = no dedup, 2.0 = 2:1 ratio)
-/// * `compress_ratio` - Compression ratio (1.0 = incompressible, 3.0 = 3:1 ratio)
+/// * `dedup_ratio` - Deduplication ratio (integer: 1 = no dedup, 2 = 2:1 ratio, etc.)
+/// * `compress_ratio` - Compression ratio (integer: 1 = incompressible, 2 = 2:1 ratio, etc.)
 /// * `numa_mode` - NUMA mode: "auto", "force", or "disabled" (default: "auto")
 /// * `max_threads` - Maximum threads to use (None = use all cores)
 ///
 /// # Returns
 /// Python bytes object with generated data (zero-copy from Rust)
 ///
+/// # Note
+/// Ratios must be integers >= 1. Floats will be truncated with a warning.
+///
 /// # Example
 /// ```python
 /// import dgen_py
 ///
 /// # Generate 1 MiB incompressible data using 8 threads
-/// data = dgen_py.generate_buffer(1024 * 1024, dedup_ratio=1.0,
-///                                  compress_ratio=1.0, max_threads=8)
+/// data = dgen_py.generate_buffer(1024 * 1024, dedup_ratio=1,
+///                                  compress_ratio=1, max_threads=8)
 /// print(f"Generated {len(data)} bytes")
 /// ```
 #[pyfunction]
@@ -153,6 +156,26 @@ fn generate_buffer(
     max_threads: Option<usize>,
     numa_node: Option<usize>,
 ) -> PyResult<Py<PyBytesView>> {
+    // Warn if floats are being truncated
+    if dedup_ratio.fract() != 0.0 {
+        let truncated = dedup_ratio as usize;
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (format!("dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
+                     dedup_ratio, truncated),)
+        )?;
+    }
+    if compress_ratio.fract() != 0.0 {
+        let truncated = compress_ratio as usize;
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (format!("compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
+                     compress_ratio, truncated),)
+        )?;
+    }
+    
     // Convert ratios to integer factors
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
@@ -194,13 +217,16 @@ fn generate_buffer(
 ///
 /// # Arguments
 /// * `buffer` - Pre-allocated Python buffer (bytearray, memoryview, numpy array, etc.)
-/// * `dedup_ratio` - Deduplication ratio
-/// * `compress_ratio` - Compression ratio
+/// * `dedup_ratio` - Deduplication ratio (integer: 1 = no dedup, 2 = 2:1 ratio, etc.)
+/// * `compress_ratio` - Compression ratio (integer: 1 = incompressible, 2 = 2:1 ratio, etc.)
 /// * `numa_mode` - NUMA mode: "auto", "force", or "disabled" (default: "auto")
 /// * `max_threads` - Maximum threads to use (None = use all cores)
 ///
 /// # Returns
 /// Number of bytes written
+///
+/// # Note
+/// Ratios must be integers >= 1. Floats will be truncated with a warning.
 ///
 /// # Example
 /// ```python
@@ -210,13 +236,14 @@ fn generate_buffer(
 /// buf = bytearray(1024 * 1024)
 ///
 /// # Generate directly into buffer (zero-copy) using 4 threads
-/// nbytes = dgen_py.generate_into_buffer(buf, dedup_ratio=1.0,
-///                                        compress_ratio=2.0, max_threads=4)
+/// nbytes = dgen_py.generate_into_buffer(buf, dedup_ratio=1,
+///                                        compress_ratio=2, max_threads=4)
 /// print(f"Wrote {nbytes} bytes")
 /// ```
 #[pyfunction]
 #[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
 fn generate_into_buffer(
+    py: Python<'_>,
     buffer: &Bound<'_, PyAny>,
     dedup_ratio: f64,
     compress_ratio: f64,
@@ -238,6 +265,26 @@ fn generate_into_buffer(
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Buffer must be C-contiguous for zero-copy operation",
         ));
+    }
+
+    // Warn if floats are being truncated
+    if dedup_ratio.fract() != 0.0 {
+        let truncated = dedup_ratio as usize;
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (format!("dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
+                     dedup_ratio, truncated),)
+        )?;
+    }
+    if compress_ratio.fract() != 0.0 {
+        let truncated = compress_ratio as usize;
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (format!("compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
+                     compress_ratio, truncated),)
+        )?;
     }
 
     let size = buf.len_bytes();
@@ -323,16 +370,22 @@ impl PyGenerator {
     ///
     /// # Arguments
     /// * `size` - Total bytes to generate
-    /// * `dedup_ratio` - Deduplication ratio
-    /// * `compress_ratio` - Compression ratio
+    /// * `dedup_ratio` - Deduplication ratio (integer: 1 = no dedup, 2 = 2:1 ratio, etc.)
+    /// * `compress_ratio` - Compression ratio (integer: 1 = incompressible, 2 = 2:1 ratio, etc.)
     /// * `numa_mode` - NUMA mode: "auto", "force", or "disabled" (default: "auto")
     /// * `max_threads` - Maximum threads to use (None = use all cores)
     /// * `numa_node` - Pin to specific NUMA node (None = use all nodes, 0-N = specific node)
     /// * `chunk_size` - Chunk size for streaming (default: 32 MB for optimal performance)
     /// * `block_size` - Internal parallelization block size (default: 4 MB, max: 32 MB)
+    /// 
+    /// # Note on Ratios
+    /// Both dedup_ratio and compress_ratio MUST be integers >= 1.
+    /// If floats are provided, they will be truncated with a warning.
+    /// Example: 2.7 becomes 2, 1.5 becomes 1
     #[new]
     #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None))]
     fn new(
+        py: Python<'_>,
         size: usize,
         dedup_ratio: f64,
         compress_ratio: f64,
@@ -342,6 +395,26 @@ impl PyGenerator {
         chunk_size: Option<usize>,
         block_size: Option<usize>,
     ) -> PyResult<Self> {
+        // Warn if floats are being truncated
+        if dedup_ratio.fract() != 0.0 {
+            let truncated = dedup_ratio as usize;
+            let warnings = py.import("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (format!("dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
+                         dedup_ratio, truncated),)
+            )?;
+        }
+        if compress_ratio.fract() != 0.0 {
+            let truncated = compress_ratio as usize;
+            let warnings = py.import("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (format!("compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
+                         compress_ratio, truncated),)
+            )?;
+        }
+        
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
 

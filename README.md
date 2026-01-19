@@ -21,10 +21,11 @@
 
 ### Version 0.1.5 Highlights 🎉
 
-**NEW: 3.0x Performance Improvement** over v0.1.3:
-- **Per-core throughput**: **10.80 GB/s** (v0.1.5) vs 3.60 GB/s (v0.1.3) = **3.0x faster**
-- **8-core system**: **86.41 GB/s** (v0.1.5) vs ~29 GB/s projected (v0.1.3) = **3.0x improvement**
-- **Maximum aggregate**: **324.72 GB/s** on 48-core dual-NUMA system (C4-96)
+**NEW: Significant Performance Improvements** over v0.1.3:
+- **UMA systems**: ~50% improvement in per-core throughput (10.80 GB/s vs ~7 GB/s)
+- **NUMA systems**: Major improvements from bug fixes in multi-process architecture
+- **8-core system**: **86.41 GB/s** aggregate throughput (C4-16)
+- **Maximum aggregate**: **324.72 GB/s** on 48-core dual-NUMA system (C4-96 with compress=2.0)
 
 ### Streaming Benchmark (v0.1.5) - 100 GB Test
 

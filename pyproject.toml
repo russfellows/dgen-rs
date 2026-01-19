@@ -51,8 +51,9 @@ python-packages = ["dgen_py"]
 # Date: January 19, 2026
 #
 # PERFORMANCE GAINS vs v0.1.3:
-#   Per-core throughput: 10.80 GB/s (v0.1.5) vs 3.60 GB/s (v0.1.3) = 3.0x improvement
-#   8-core system:       86.41 GB/s (v0.1.5) vs ~29 GB/s (v0.1.3)  = 3.0x improvement
+#   UMA systems: ~50% improvement (10.80 GB/s per core vs ~7 GB/s)
+#   NUMA systems: Significant improvements from bug fixes
+#   Note: v0.1.3 reported 3.60 GB/s per-thread, v0.1.5 reports per physical core
 #
 # SCALING RESULTS (compress_ratio=1.0, incompressible):
 #

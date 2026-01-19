@@ -4,12 +4,15 @@ All notable changes to dgen-rs/dgen-py will be documented in this file.
 
 ## [0.1.5] - 2026-01-19
 
-### 🎉 Major Performance Breakthrough: 3.0x Improvement
+### 🎉 Major Performance Improvements
 
 #### Performance Gains vs v0.1.3
-- **Per-core throughput**: **10.80 GB/s** (v0.1.5) vs 3.60 GB/s (v0.1.3) = **3.0x improvement**
-- **8-core system**: **86.41 GB/s** (v0.1.5) vs ~29 GB/s projected (v0.1.3) = **3.0x faster**
-- **Maximum aggregate**: **324.72 GB/s** on 48-core dual-NUMA system (GCP C4-96)
+- **UMA systems (single NUMA node)**: ~50% improvement in per-core throughput
+  - v0.1.5: 10.80 GB/s per core (C4-16, 8 cores)
+  - v0.1.3: ~7 GB/s per core (12-core Ice Lake: 43.25 GB/s / 12 = 3.60 GB/s per thread)
+  - Note: v0.1.3 reported per-thread, v0.1.5 reports per physical core
+- **NUMA systems**: Significant improvements due to bug fixes in NUMA implementation
+- **Maximum aggregate**: **324.72 GB/s** on 48-core dual-NUMA system (GCP C4-96 with compress=2.0)
 
 ### Changed
 

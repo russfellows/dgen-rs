@@ -168,24 +168,26 @@ gen = dgen_py.Generator(
 
 ---
 
-## Performance vs v0.1.3 (Apples-to-Apples)
+## Performance vs v0.1.3
 
-**Comparing similar 8-core UMA systems**:
+**Important Note**: v0.1.3 reported per-THREAD throughput (3.60 GB/s), while v0.1.5 reports per physical CORE throughput (10.80 GB/s).
 
-| Version | System | Cores | Chunk Size | Throughput | Per-Core |
-|---------|--------|-------|------------|------------|----------|
-| **v0.1.3** | 12-core Ice Lake | 12 | 64 MB | 43.25 GB/s | 3.60 GB/s |
-| **v0.1.5** | C4-16 Emerald Rapid | 8 | 64 MB | **86.41 GB/s** | **10.80 GB/s** |
+**UMA System Comparison**:
 
-**Performance Improvement**:
-- **10.80 GB/s per core** (v0.1.5) vs 3.60 GB/s (v0.1.3) = **3.0x improvement**
-- Scaling to 12 cores @ 10.80 GB/s/core = **129.6 GB/s projected** vs 43.25 GB/s actual = **3.0x faster**
+| Version | System | Cores | Throughput | Per-Thread | Per-Core (approx) |
+|---------|--------|-------|------------|------------|-------------------|
+| **v0.1.3** | 12-core Ice Lake | 12 | 43.25 GB/s | 3.60 GB/s | ~7 GB/s* |
+| **v0.1.5** | C4-16 Emerald Rapid | 8 | 86.41 GB/s | 5.40 GB/s | **10.80 GB/s** |
+
+\* *Estimated based on accounting for hyperthreading and measurement methodology differences*
+
+**UMA Performance Improvement**: ~50% (1.5x) improvement in per-core throughput on single-NUMA systems
 
 **Contributing Factors**:
-1. **Newer CPU architecture** (Emerald Rapid vs Ice Lake) - improved memory bandwidth
-2. **Multi-process NUMA** architecture (v0.1.5) vs single-process (v0.1.3)
-3. **Optimized affinity** with `os.sched_setaffinity()` pinning
-4. **Larger L3 cache** on Emerald Rapid (better 64 MB chunk performance)
+1. **BLOCK_SIZE optimization** (64 KB → 4 MB) - better L3 cache utilization
+2. **Newer CPU architecture** (Emerald Rapid vs Ice Lake) - improved memory bandwidth
+3. **Optimized chunk size** (64 MB) for newer generation CPUs
+4. **NUMA systems**: Additional improvements from bug fixes in multi-process architecture
 
 ---
 

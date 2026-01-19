@@ -1,6 +1,6 @@
 [package]
 name = "dgen-rs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Russ Fellows <russ.fellows@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -11,6 +11,10 @@ categories = ["development-tools::profiling", "algorithms"]
 [lib]
 name = "dgen_rs"
 crate-type = ["cdylib", "rlib"]  # cdylib for Python bindings, rlib for Rust usage
+
+[[bin]]
+name = "streaming-bench"
+path = "benches/streaming_throughput.rs"
 
 [dependencies]
 # RNG and data generation

@@ -274,6 +274,10 @@ pub struct GeneratorConfig {
     /// Pin to specific NUMA node (None = use all nodes, Some(n) = pin to node n)
     /// When set, only uses cores from this NUMA node and limits threads accordingly
     pub numa_node: Option<usize>,
+    /// Internal block size for parallelization (None = use BLOCK_SIZE constant)
+    /// Larger blocks (16-32 MB) improve throughput by amortizing Rayon overhead
+    /// but use more memory. Must be at least 1 MB and at most 32 MB.
+    pub block_size: Option<usize>,
 }
 
 impl Default for GeneratorConfig {
@@ -285,6 +289,7 @@ impl Default for GeneratorConfig {
             numa_mode: NumaMode::Auto,
             max_threads: None, // Use all available cores
             numa_node: None,   // Use all NUMA nodes
+            block_size: None,  // Use BLOCK_SIZE constant (4 MB)
         }
     }
 }
@@ -312,6 +317,7 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
         numa_mode: NumaMode::Auto,
         max_threads: None,
         numa_node: None,
+        block_size: None,
     };
     generate_data(config)
 }
@@ -336,15 +342,21 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
 ///
 /// Python accesses this memory directly via buffer protocol - ZERO COPY!
 pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
+    // Validate and get effective block size (default 4 MB, max 32 MB)
+    let block_size = config.block_size
+        .map(|bs| bs.clamp(1024 * 1024, 32 * 1024 * 1024))  // 1 MB min, 32 MB max
+        .unwrap_or(BLOCK_SIZE);
+    
     tracing::info!(
-        "Starting data generation: size={}, dedup={}, compress={}",
+        "Starting data generation: size={}, dedup={}, compress={}, block_size={}",
         config.size,
         config.dedup_factor,
-        config.compress_factor
+        config.compress_factor,
+        block_size
     );
 
-    let size = config.size.max(MIN_SIZE);
-    let nblocks = size.div_ceil(BLOCK_SIZE);
+    let size = config.size.max(block_size);  // Use block_size as minimum
+    let nblocks = size.div_ceil(block_size);
 
     let dedup_factor = config.dedup_factor.max(1);
     let unique_blocks = if dedup_factor > 1 {
@@ -369,8 +381,8 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
     } else {
         (0, 1)
     };
-    let floor_len = (f_num * BLOCK_SIZE) / f_den;
-    let rem = (f_num * BLOCK_SIZE) % f_den;
+    let floor_len = (f_num * block_size) / f_den;
+    let rem = (f_num * block_size) % f_den;
 
     let copy_lens: Vec<usize> = {
         let mut v = Vec::with_capacity(unique_blocks);
@@ -391,7 +403,7 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
     let call_entropy = generate_call_entropy();
 
     // Allocate buffer (NUMA-aware if numa_node is specified)
-    let total_size = nblocks * BLOCK_SIZE;
+    let total_size = nblocks * block_size;
     tracing::debug!("Allocating {} bytes ({} blocks)", total_size, nblocks);
     
     // CRITICAL: UMA fast path - always use Vec<u8> when numa_node is None
@@ -567,7 +579,7 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
                 );
                 pool.install(|| {
                     let _data = data_buffer.as_mut_slice();
-                    _data.par_chunks_mut(BLOCK_SIZE).for_each(|chunk| {
+                    _data.par_chunks_mut(block_size).for_each(|chunk| {
                         // Touch each page to allocate it locally
                         // Linux allocates memory on the node of the thread that first writes to it
                         chunk[0] = 0;
@@ -584,7 +596,7 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
 
     pool.install(|| {
         let data = data_buffer.as_mut_slice();
-        data.par_chunks_mut(BLOCK_SIZE)
+        data.par_chunks_mut(block_size)
             .enumerate()
             .for_each(|(i, chunk)| {
                 let ub = i % unique_blocks;
@@ -802,20 +814,27 @@ pub struct DataGenerator {
     call_entropy: u64,
     max_threads: usize,  // Thread count for parallel generation
     thread_pool: Option<rayon::ThreadPool>,  // Reused thread pool (created once)
+    block_size: usize,   // Internal parallelization block size (4-32 MB)
 }
 
 impl DataGenerator {
     /// Create new streaming generator
     pub fn new(config: GeneratorConfig) -> Self {
+        // Validate and get effective block size (default 4 MB, max 32 MB)
+        let block_size = config.block_size
+            .map(|bs| bs.clamp(1024 * 1024, 32 * 1024 * 1024))  // 1 MB min, 32 MB max
+            .unwrap_or(BLOCK_SIZE);
+        
         tracing::info!(
-            "Creating DataGenerator: size={}, dedup={}, compress={}",
+            "Creating DataGenerator: size={}, dedup={}, compress={}, block_size={}",
             config.size,
             config.dedup_factor,
-            config.compress_factor
+            config.compress_factor,
+            block_size
         );
 
-        let total_size = config.size.max(MIN_SIZE);
-        let nblocks = total_size.div_ceil(BLOCK_SIZE);
+        let total_size = config.size.max(block_size);  // Use block_size as minimum
+        let nblocks = total_size.div_ceil(block_size);
 
         let dedup_factor = config.dedup_factor.max(1);
         let unique_blocks = if dedup_factor > 1 {
@@ -830,8 +849,8 @@ impl DataGenerator {
         } else {
             (0, 1)
         };
-        let floor_len = (f_num * BLOCK_SIZE) / f_den;
-        let rem = (f_num * BLOCK_SIZE) % f_den;
+        let floor_len = (f_num * block_size) / f_den;
+        let rem = (f_num * block_size) % f_den;
 
         let copy_lens: Vec<usize> = {
             let mut v = Vec::with_capacity(unique_blocks);
@@ -888,6 +907,7 @@ impl DataGenerator {
             call_entropy,
             max_threads,
             thread_pool,
+            block_size,
         }
     }
 
@@ -915,10 +935,10 @@ impl DataGenerator {
         let chunk = &mut buf[..to_write];
 
         // Determine number of blocks to generate
-        let start_block = self.current_pos / BLOCK_SIZE;
-        let start_offset = self.current_pos % BLOCK_SIZE;
+        let start_block = self.current_pos / self.block_size;
+        let start_offset = self.current_pos % self.block_size;
         let end_pos = self.current_pos + to_write;
-        let end_block = (end_pos - 1) / BLOCK_SIZE;
+        let end_block = (end_pos - 1) / self.block_size;
         let num_blocks = end_block - start_block + 1;
 
         // Use parallel generation for large buffers (>=2 blocks), sequential for small
@@ -948,18 +968,18 @@ impl DataGenerator {
         for i in 0..num_blocks {
             let block_idx = start_block + i;
             let block_offset = if i == 0 { start_offset } else { 0 };
-            let remaining_in_block = BLOCK_SIZE - block_offset;
+            let remaining_in_block = self.block_size - block_offset;
             let to_copy = remaining_in_block.min(chunk.len() - offset);
 
             // Map to unique block
             let ub = block_idx % self.unique_blocks;
 
             // Generate full block
-            let mut block_buf = vec![0u8; BLOCK_SIZE];
+            let mut block_buf = vec![0u8; self.block_size];
             fill_block(
                 &mut block_buf,
                 ub,
-                self.copy_lens[ub].min(BLOCK_SIZE),
+                self.copy_lens[ub].min(self.block_size),
                 self.call_entropy,
             );
 
@@ -1005,12 +1025,13 @@ impl DataGenerator {
         let call_entropy = self.call_entropy;
         let copy_lens = &self.copy_lens;
         let unique_blocks = self.unique_blocks;
+        let block_size = self.block_size;
 
         // ZERO-COPY: Generate directly into output buffer using par_chunks_mut
         // This is the same approach as generate_data() - no temporary allocations!
         thread_pool.install(|| {
             chunk
-                .par_chunks_mut(BLOCK_SIZE)
+                .par_chunks_mut(block_size)
                 .enumerate()
                 .for_each(|(i, block_chunk)| {
                     let block_idx = start_block + i;
@@ -1019,13 +1040,13 @@ impl DataGenerator {
                     // Handle first block with offset
                     if i == 0 && start_offset > 0 {
                         // Generate full block into temp, copy needed portion
-                        let mut temp = vec![0u8; BLOCK_SIZE];
-                        fill_block(&mut temp, ub, copy_lens[ub].min(BLOCK_SIZE), call_entropy);
-                        let copy_len = BLOCK_SIZE.saturating_sub(start_offset).min(block_chunk.len());
+                        let mut temp = vec![0u8; block_size];
+                        fill_block(&mut temp, ub, copy_lens[ub].min(block_size), call_entropy);
+                        let copy_len = block_size.saturating_sub(start_offset).min(block_chunk.len());
                         block_chunk[..copy_len].copy_from_slice(&temp[start_offset..start_offset + copy_len]);
                     } else {
                         // Generate directly into output buffer (ZERO-COPY!)
-                        let actual_len = block_chunk.len().min(BLOCK_SIZE);
+                        let actual_len = block_chunk.len().min(block_size);
                         fill_block(&mut block_chunk[..actual_len], ub, copy_lens[ub].min(actual_len), call_entropy);
                     }
                 });

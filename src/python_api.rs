@@ -178,6 +178,7 @@ fn generate_buffer(
         numa_mode: numa,
         max_threads,
         numa_node,  // CRITICAL: Use the parameter to bind to specific NUMA node
+        block_size: None,
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
@@ -264,6 +265,7 @@ fn generate_into_buffer(
         numa_mode: numa,
         max_threads,
         numa_node,  // CRITICAL: Bind to specific NUMA node if specified
+        block_size: None,
     };
 
     // Generate data
@@ -327,8 +329,9 @@ impl PyGenerator {
     /// * `max_threads` - Maximum threads to use (None = use all cores)
     /// * `numa_node` - Pin to specific NUMA node (None = use all nodes, 0-N = specific node)
     /// * `chunk_size` - Chunk size for streaming (default: 32 MB for optimal performance)
+    /// * `block_size` - Internal parallelization block size (default: 4 MB, max: 32 MB)
     #[new]
-    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None))]
+    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None))]
     fn new(
         size: usize,
         dedup_ratio: f64,
@@ -337,6 +340,7 @@ impl PyGenerator {
         max_threads: Option<usize>,
         numa_node: Option<usize>,
         chunk_size: Option<usize>,
+        block_size: Option<usize>,
     ) -> PyResult<Self> {
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
@@ -361,6 +365,7 @@ impl PyGenerator {
             numa_mode: numa,
             max_threads,
             numa_node,
+            block_size,
         };
 
         let chunk_size = chunk_size.unwrap_or_else(DataGenerator::recommended_chunk_size);

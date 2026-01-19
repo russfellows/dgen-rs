@@ -2,26 +2,47 @@
 
 **High-performance random data generation with NUMA optimization and zero-copy Python interface**
 
-[![Version](https://img.shields.io/badge/version-0.1.4-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
 
 ## Features
 
-- 🚀 **Blazing Fast**: 40+ GB/s on 12 cores, 126 GB/s on 96 cores, 188 GB/s on 368 cores
+- 🚀 **Blazing Fast**: 58+ GB/s streaming throughput, matches Numba JIT performance
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
 - 🐍 **True Zero-Copy**: Python buffer protocol with direct memory access (no data copying)
-- 📦 **Streaming API**: Generate terabytes of data with constant memory usage
+- 📦 **Streaming API**: Generate terabytes of data with constant 32 MB memory usage
 - 🧵 **Thread Pool Reuse**: Created once, reused across all operations
 - 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
 
 ## Performance
 
-### Real-World Benchmarks (v0.1.3)
+### Streaming Benchmark (v0.1.5) - 100 GB Test
 
-**Multi-NUMA Systems** (one Python process per NUMA node):
+Comparison of streaming random data generation methods on a 12-core system:
+
+| Method | Throughput | Speedup vs Baseline | Memory Required |
+|--------|------------|---------------------|-----------------|
+| **os.urandom()** (baseline) | 0.34 GB/s | 1.0x | Minimal |
+| **NumPy Multi-Thread** | 1.06 GB/s | 3.1x | 100 GB RAM* |
+| **Numba JIT Xoshiro256++** (streaming) | 57.11 GB/s | 165.7x | 32 MB RAM |
+| **dgen-py v0.1.5** (streaming) | **58.46 GB/s** | **169.6x** | **32 MB RAM** |
+
+\* *NumPy requires full dataset in memory (10 GB tested, would need 100 GB for 100 GB dataset)*
+
+**Key Findings:**
+- **dgen-py matches Numba's streaming performance** (58.46 vs 57.11 GB/s)
+- **55x faster than NumPy** while using **3,000x less memory** (32 MB vs 100 GB)
+- **Streaming architecture**: Can generate unlimited data with only 32 MB RAM
+- **Per-core throughput**: 4.87 GB/s (12 cores)
+
+> **⚠️ Critical for Storage Testing**: **ONLY dgen-py** supports configurable **deduplication and compression ratios**. All other methods (os.urandom, NumPy, Numba) generate purely random data with maximum entropy, making them unsuitable for realistic storage system testing. Real-world storage workloads require controllable data characteristics to test deduplication engines, compression algorithms, and storage efficiency—capabilities unique to dgen-py.
+
+### Multi-NUMA Benchmarks (v0.1.3)
+
+**Large-scale systems** (one Python process per NUMA node):
 
 | System | Cores | NUMA Nodes | Throughput | Per-Core | Efficiency |
 |--------|-------|------------|------------|----------|------------|
@@ -29,17 +50,11 @@
 | **GCP C4-96** | 96 | 4 | 126.96 GB/s | 1.32 GB/s | 53% |
 | **Azure HBv5** | 368 | 16 | 188.24 GB/s | 0.51 GB/s | 20% |
 
-**Single-NUMA Systems** (one Python process):
-
-| System | Cores | Throughput | Per-Core | Notes |
-|--------|-------|------------|----------|-------|
-| **Workstation** | 12 | 41.23 GB/s | 3.44 GB/s | Development system, UMA |
-
 **Key Findings:**
 - Sub-linear scaling is **expected** for memory-intensive workloads (memory bandwidth bottleneck)
-- All systems **far exceed 80 GB/s** storage testing requirements
-- Maximum throughput: 188 GB/s on 368-core HBv5 system
-- Excellent single-node performance: 40+ GB/s on commodity hardware
+- All systems **far exceed storage testing requirements**
+- Maximum throughput: 188 GB/s on 368-core system
+- Excellent single-node performance: 58+ GB/s on commodity hardware
 
 ## Installation
 

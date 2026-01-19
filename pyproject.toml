@@ -1,6 +1,6 @@
 [project]
 name = "dgen-py"
-version = "0.1.4"
+version = "0.1.5"
 description = "High-performance random data generation with NUMA optimization and zero-copy Python interface"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,43 +43,54 @@ python-source = "python"
 python-packages = ["dgen_py"]
 
 # ==================================================================================
-# PERFORMANCE BENCHMARKS (v0.1.3 - Multi-Process NUMA)
+# PERFORMANCE BENCHMARKS (v0.1.5 - Multi-Process NUMA)
 # ==================================================================================
 # Benchmark: 1024 GB total (incompressible), multi-process NUMA architecture
-# Method: One Python process per NUMA node, local memory allocation, local cores
-# Date: January 18, 2026
+# Method: One Python process per NUMA node, process affinity pinning, 64 MB chunks
+# Platform: Google Cloud Platform (GCP) Intel Emerald Rapid
+# Date: January 19, 2026
 #
-# SCALING RESULTS:
+# PERFORMANCE GAINS vs v0.1.3:
+#   UMA systems: ~50% improvement (10.80 GB/s per core vs ~7 GB/s)
+#   NUMA systems: Significant improvements from bug fixes
+#   Note: v0.1.3 reported 3.60 GB/s per-thread, v0.1.5 reports per physical core
 #
-#   System          Cores  NUMA   Aggregate      Per-Core   Efficiency
-#   --------------  -----  -----  -------------  ---------  ----------
-#   GCP C4-16         16     1    39.87 GB/s     2.49 GB/s    100% (baseline)
-#   GCP C4-96         96     4   126.96 GB/s     1.32 GB/s     53%
-#   Azure HBv5       368    16   188.24 GB/s     0.51 GB/s     20%
+# SCALING RESULTS (compress_ratio=1.0, incompressible):
+#
+#   Instance   Cores  NUMA   Aggregate      Per-Core    Efficiency
+#   ---------  -----  -----  -------------  ----------  -----------
+#   GCP C4-8      4     1     36.26 GB/s     9.07 GB/s   Baseline
+#   GCP C4-16     8     1     86.41 GB/s    10.80 GB/s   119% (super-linear)
+#   GCP C4-32    16     1    162.78 GB/s    10.17 GB/s   112% (super-linear)
+#   GCP C4-96    48     2    248.53 GB/s     5.18 GB/s    51% (NUMA penalty)
+#
+# COMPRESSION IMPACT (compress_ratio=2.0 vs 1.0):
+#   C4-8:   53.95 GB/s  (1.49x speedup)
+#   C4-16: 125.88 GB/s  (1.46x speedup)
+#   C4-32: 222.28 GB/s  (1.37x speedup)
+#   C4-96: 324.72 GB/s  (1.31x speedup)
+#
+#   NOTE: Higher compress_ratio improves performance BUT makes data more compressible.
+#         Choose based on YOUR test requirements, not performance numbers.
 #
 # KEY FINDINGS:
-#   • Sub-linear scaling is EXPECTED for memory-intensive workloads
-#   • Memory bandwidth becomes bottleneck as core count increases
-#   • All systems EXCEED 80 GB/s storage testing requirement
-#   • C4-96 offers best efficiency/throughput balance (126.96 GB/s at 53%)
-#   • HBv5 achieves maximum throughput (188.24 GB/s = 2.4x storage target)
+#   • Excellent UMA scaling: 112-119% efficiency on single-NUMA systems
+#   • Super-linear scaling due to larger L3 cache on bigger instances
+#   • NUMA penalty: 49% per-core reduction on multi-socket systems
+#   • Maximum throughput: 324.72 GB/s (compress=2.0, C4-96)
+#   • Deduplication ratio has ZERO performance impact (< 1% variance)
 #
 # NUMA ARCHITECTURE:
 #   • Multi-process: 1 Python process per NUMA node
+#   • Process pinning: os.sched_setaffinity() to local cores
 #   • Local allocation: Each process allocates buffer on LOCAL node
-#   • Local cores: Each process uses ONLY cores from LOCAL node  
-#   • Zero cross-node traffic: No remote memory access
-#   • True zero-copy: Python memoryview accesses Rust memory via raw pointer
-#
-# PER-NODE PERFORMANCE (C4-96, 4 NUMA nodes):
-#   Node 0: 32.49 GB/s  |  Node 2: 32.20 GB/s
-#   Node 1: 31.74 GB/s  |  Node 3: 32.64 GB/s
-#   Balance: ±1.4% variation (excellent)
+#   • Synchronized start: multiprocessing.Barrier for accurate timing
+#   • True zero-copy: Python buffer protocol with direct memory access
 #
 # STORAGE BENCHMARKING GUIDANCE:
-#   Target < 40 GB/s:     Use UMA systems (16-32 cores)
-#   Target 40-130 GB/s:   Use NUMA systems (64-96 cores) 
-#   Target 130-200 GB/s:  Use large NUMA (368+ cores)
+#   Target < 80 GB/s:     Use C4-8 or C4-16 (8 cores sufficient)
+#   Target 80-160 GB/s:   Use C4-32 (16 cores, excellent efficiency)
+#   Target 160-320 GB/s:  Use C4-96 (48 cores, despite NUMA penalty)
 #
-# See docs/PERFORMANCE_SCALING.md for detailed analysis
+# See docs/BENCHMARK_RESULTS_V0.1.5.md for complete analysis
 # ==================================================================================

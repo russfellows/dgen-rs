@@ -2,44 +2,72 @@
 
 **High-performance random data generation with NUMA optimization and zero-copy Python interface**
 
-[![Version](https://img.shields.io/badge/version-0.1.4-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
 
 ## Features
 
-- 🚀 **Blazing Fast**: 40+ GB/s on 12 cores, 126 GB/s on 96 cores, 188 GB/s on 368 cores
+- 🚀 **Blazing Fast**: 58+ GB/s streaming throughput, matches Numba JIT performance
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
 - 🐍 **True Zero-Copy**: Python buffer protocol with direct memory access (no data copying)
-- 📦 **Streaming API**: Generate terabytes of data with constant memory usage
+- 📦 **Streaming API**: Generate terabytes of data with constant 32 MB memory usage
 - 🧵 **Thread Pool Reuse**: Created once, reused across all operations
 - 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
 
 ## Performance
 
-### Real-World Benchmarks (v0.1.3)
+### Version 0.1.5 Highlights 🎉
 
-**Multi-NUMA Systems** (one Python process per NUMA node):
+**NEW: Significant Performance Improvements** over v0.1.3:
+- **UMA systems**: ~50% improvement in per-core throughput (10.80 GB/s vs ~7 GB/s)
+- **NUMA systems**: Major improvements from bug fixes in multi-process architecture
+- **8-core system**: **86.41 GB/s** aggregate throughput (C4-16)
+- **Maximum aggregate**: **324.72 GB/s** on 48-core dual-NUMA system (C4-96 with compress=2.0)
 
-| System | Cores | NUMA Nodes | Throughput | Per-Core | Efficiency |
-|--------|-------|------------|------------|----------|------------|
-| **GCP C4-16** | 16 | 1 (UMA) | 39.87 GB/s | 2.49 GB/s | 100% (baseline) |
-| **GCP C4-96** | 96 | 4 | 126.96 GB/s | 1.32 GB/s | 53% |
-| **Azure HBv5** | 368 | 16 | 188.24 GB/s | 0.51 GB/s | 20% |
+### Streaming Benchmark (v0.1.5) - 100 GB Test
 
-**Single-NUMA Systems** (one Python process):
+Comparison of streaming random data generation methods on a 12-core system:
 
-| System | Cores | Throughput | Per-Core | Notes |
-|--------|-------|------------|----------|-------|
-| **Workstation** | 12 | 41.23 GB/s | 3.44 GB/s | Development system, UMA |
+| Method | Throughput | Speedup vs Baseline | Memory Required |
+|--------|------------|---------------------|-----------------|
+| **os.urandom()** (baseline) | 0.34 GB/s | 1.0x | Minimal |
+| **NumPy Multi-Thread** | 1.06 GB/s | 3.1x | 100 GB RAM* |
+| **Numba JIT Xoshiro256++** (streaming) | 57.11 GB/s | 165.7x | 32 MB RAM |
+| **dgen-py v0.1.5** (streaming) | **58.46 GB/s** | **169.6x** | **32 MB RAM** |
+
+\* *NumPy requires full dataset in memory (10 GB tested, would need 100 GB for 100 GB dataset)*
 
 **Key Findings:**
-- Sub-linear scaling is **expected** for memory-intensive workloads (memory bandwidth bottleneck)
-- All systems **far exceed 80 GB/s** storage testing requirements
-- Maximum throughput: 188 GB/s on 368-core HBv5 system
-- Excellent single-node performance: 40+ GB/s on commodity hardware
+- **dgen-py matches Numba's streaming performance** (58.46 vs 57.11 GB/s)
+- **55x faster than NumPy** while using **3,000x less memory** (32 MB vs 100 GB)
+- **Streaming architecture**: Can generate unlimited data with only 32 MB RAM
+- **Per-core throughput**: 4.87 GB/s (12 cores)
+
+> **⚠️ Critical for Storage Testing**: **ONLY dgen-py** supports configurable **deduplication and compression ratios**. All other methods (os.urandom, NumPy, Numba) generate purely random data with maximum entropy, making them unsuitable for realistic storage system testing. Real-world storage workloads require controllable data characteristics to test deduplication engines, compression algorithms, and storage efficiency—capabilities unique to dgen-py.
+
+### Multi-NUMA Benchmarks (v0.1.5) - GCP Emerald Rapid
+
+**Scalability testing** on Google Cloud Platform Intel Emerald Rapid systems (1024 GB workload, compress=1.0):
+
+| Instance | Physical Cores | NUMA Nodes | Aggregate Throughput | Per-Core | Scaling Efficiency |
+|----------|----------------|------------|---------------------|----------|-------------------|
+| **C4-8** | 4 | 1 (UMA) | 36.26 GB/s | 9.07 GB/s | Baseline |
+| **C4-16** | 8 | 1 (UMA) | **86.41 GB/s** | **10.80 GB/s** | **119%** |
+| **C4-32** | 16 | 1 (UMA) | **162.78 GB/s** | **10.17 GB/s** | **112%** |
+| **C4-96** | 48 | 2 (NUMA) | 248.53 GB/s | 5.18 GB/s | 51%* |
+
+\* *NUMA penalty: 49% per-core reduction on multi-socket systems, but still achieves highest absolute throughput*
+
+**Key Findings:**
+- **Excellent UMA scaling**: 112-119% efficiency on single-NUMA systems (super-linear due to larger L3 cache)
+- **Per-core performance**: 10.80 GB/s on C4-16 (3.0x improvement vs dgen-py v0.1.3's 3.60 GB/s)
+- **Compression tradeoff**: compress=2.0 provides 1.3-1.5x speedup, but makes data compressible (choose based on your test requirements, not performance)
+- **Storage headroom**: Even modest 8-core systems exceed 86 GB/s (far beyond typical storage requirements)
+
+**See [docs/BENCHMARK_RESULTS_V0.1.5.md](docs/BENCHMARK_RESULTS_V0.1.5.md) for complete analysis**
 
 ## Installation
 
@@ -64,111 +92,39 @@ sudo yum install systemd-devel hwloc-devel
 
 ## Quick Start
 
-### Basic Usage (Fastest - No Dedup/Compression)
-
-```python
-import dgen_py
-
-# Generate 100 GB of random data (incompressible, no dedup)
-gen = dgen_py.Generator(
-    size=100 * 1024**3,      # 100 GB
-    dedup_ratio=1.0,         # No deduplication (fastest)
-    compress_ratio=1.0,      # Incompressible (fastest)
-    numa_mode="auto",        # Auto-detect NUMA topology
-    max_threads=None         # Use all available cores
-)
-
-# Create buffer (uses optimal 32 MB chunk size)
-buffer = bytearray(gen.chunk_size)
-
-# Stream data in chunks (zero-copy, parallel generation)
-while not gen.is_complete():
-    nbytes = gen.fill_chunk(buffer)
-    if nbytes == 0:
-        break
-    # Write to file/network: buffer[:nbytes]
-```
-
-### Performance Example (Actual Results)
+### Basic Usage
 
 ```python
 import dgen_py
 import time
 
-# 100 GB incompressible test
-TEST_SIZE = 100 * 1024**3
-
+# Generate 100 GB of random data with configurable characteristics
 gen = dgen_py.Generator(
-    size=TEST_SIZE,
-    dedup_ratio=1.0,         # No deduplication
-    compress_ratio=1.0,      # Incompressible
-    numa_mode="auto",
-    max_threads=None
+    size=100 * 1024**3,      # 100 GB
+    dedup_ratio=1.0,         # No deduplication 
+    compress_ratio=1.0,      # Incompressible 
+    numa_mode="auto",        # Auto-detect NUMA topology
+    max_threads=None         # Use all available cores
 )
 
+# Create buffer (uses optimal chunk size automatically)
 buffer = bytearray(gen.chunk_size)
-start = time.perf_counter()
 
+# Stream data in chunks (zero-copy, parallel generation)
+start = time.perf_counter()
 while not gen.is_complete():
     nbytes = gen.fill_chunk(buffer)
     if nbytes == 0:
         break
+    # Write to file/network: buffer[:nbytes]
 
 duration = time.perf_counter() - start
-throughput = (TEST_SIZE / 1024**3) / duration
-
-print(f"Duration: {duration:.2f} seconds")
-print(f"Throughput: {throughput:.2f} GB/s")
+print(f"Throughput: {(100 / duration):.2f} GB/s")
 ```
 
-**Complete benchmark output (12-core workstation):**
-
+**Example output (8-core system):**
 ```
-NUMA nodes: 1
-Physical cores: 12
-Deployment: UMA (single NUMA node - cloud VM or workstation)
-
-Starting Benchmark: 3 runs of 100 GB each
-Using ZERO-COPY PARALLEL STREAMING
-
-============================================================
-TEST 1: DEFAULT CHUNK SIZE (should use optimal 32 MB)
-============================================================
-Using chunk size: 32 MB
-------------------------------------------------------------
-Run 01: 3.0401 seconds | 32.89 GB/s
-Run 02: 2.1536 seconds | 46.43 GB/s
-Run 03: 2.0826 seconds | 48.02 GB/s
-------------------------------------------------------------
-AVERAGE DURATION:   2.4254 seconds
-AVERAGE THROUGHPUT: 41.23 GB/s
-PER-CORE THROUGHPUT: 3.44 GB/s
-
-============================================================
-TEST 2: OVERRIDE CHUNK SIZE TO 64 MB
-============================================================
-Using chunk size: 64 MB
-------------------------------------------------------------
-Run 01: 2.2696 seconds | 44.06 GB/s
-Run 02: 2.2647 seconds | 44.16 GB/s
-Run 03: 2.2709 seconds | 44.04 GB/s
-------------------------------------------------------------
-AVERAGE DURATION:   2.2684 seconds
-AVERAGE THROUGHPUT: 44.08 GB/s
-PER-CORE THROUGHPUT: 3.67 GB/s
-
-============================================================
-COMPARISON
-============================================================
-32 MB (default): 41.23 GB/s
-64 MB (override): 44.08 GB/s
-64 MB is 6.5% faster than 32 MB
-
-OPTIMIZATION NOTES:
-  - Thread pool created ONCE and reused
-  - ZERO-COPY: Generates directly into output buffer
-  - Internal parallelization: 4 MiB blocks (optimal for L3 cache)
-  - Parallel generation distributes blocks across all available cores
+Throughput: 86.41 GB/s
 ```
 
 ### System Information
@@ -181,117 +137,70 @@ if info:
     print(f"NUMA nodes: {info['num_nodes']}")
     print(f"Physical cores: {info['physical_cores']}")
     print(f"Deployment: {info['deployment_type']}")
-
-# Example output (12-core workstation):
-# NUMA nodes: 1
-# Physical cores: 12
-# Deployment: UMA (single NUMA node - cloud VM or workstation)
 ```
 
 ## Advanced Usage
 
 ### Multi-Process NUMA (For Multi-NUMA Systems)
-}
-```
 
-### Multi-Process NUMA (For Multi-NUMA Systems)
+For maximum throughput on multi-socket systems, use **one Python process per NUMA node** with process affinity pinning.
 
-For maximum throughput on multi-socket systems, use **one Python process per NUMA node**:
+**See [python/examples/benchmark_numa_multiprocess_v2.py](python/examples/benchmark_numa_multiprocess_v2.py) for complete implementation.**
 
-```python
-from multiprocessing import Process, Queue, Barrier
-import dgen_py
+Key architecture:
+- One Python process per NUMA node
+- Process pinning via `os.sched_setaffinity()` to local cores
+- Local memory allocation on each NUMA node
+- Synchronized start with multiprocessing.Barrier
 
-def worker_process(numa_node: int, barrier: Barrier, result_queue: Queue):
-    """One process per NUMA node for maximum performance"""
-    gen = dgen_py.Generator(
-        size=100 * 1024**3,      # 100 GB per process
-        dedup_ratio=1.0,         # No deduplication
-        compress_ratio=1.0,      # Incompressible
-        numa_node=numa_node,     # Bind to specific NUMA node
-        max_threads=None
-    )
-    
-    buffer = bytearray(gen.chunk_size)
-    barrier.wait()  # Synchronized start
-    
-    start = time.perf_counter()
-    while not gen.is_complete():
-        nbytes = gen.fill_chunk(buffer)
-        if nbytes == 0:
-            break
-        # Write buffer[:nbytes] to storage
-    
-    duration = time.perf_counter() - start
-    result_queue.put({'numa_node': numa_node, 'duration': duration})
-
-# Detect NUMA topology
-num_numa_nodes = dgen_py.detect_numa_nodes()
-
-# Spawn one process per NUMA node
-barrier = Barrier(num_numa_nodes)
-result_queue = Queue()
-
-processes = [
-    Process(target=worker_process, args=(i, barrier, result_queue))
-    for i in range(num_numa_nodes)
-]
-
-for p in processes:
-    p.start()
-
-for p in processes:
-    p.join()
-
-# Collect results
-# On C4-96 (4 NUMA nodes): 126.96 GB/s aggregate
-# On HBv5 (16 NUMA nodes): 188.24 GB/s aggregate
-```
+**Results**:
+- C4-96 (48 cores, 2 NUMA nodes): 248.53 GB/s aggregate
+- C4-32 (16 cores, 1 NUMA node): 162.78 GB/s with 112% scaling efficiency
 
 ## Performance Notes
 
 ### Chunk Size Optimization
 
-**32 MB chunks are optimal** (default), but you can override:
+**Default chunk size is automatically optimized** for your system. You can override if needed:
 
 ```python
 gen = dgen_py.Generator(
     size=100 * 1024**3,
-    dedup_ratio=1.0,
-    compress_ratio=1.0,
     chunk_size=64 * 1024**2  # Override to 64 MB
 )
 ```
 
-**Benchmark results (12-core workstation, 100 GB test):**
-- **32 MB chunks**: 41.23 GB/s (3.44 GB/s per core)
-- **64 MB chunks**: 44.08 GB/s (3.67 GB/s per core)
-- **Difference**: 64 MB is 6.5% faster on this system
+**Newer CPUs** (Emerald Rapid, Sapphire Rapids) with larger L3 cache benefit from 64 MB chunks.
 
-### Deduplication and Compression
+### Deduplication and Compression Ratios
 
-For **maximum performance**, use `dedup_ratio=1.0` and `compress_ratio=1.0`:
+**Performance vs Test Accuracy Tradeoff**:
 
 ```python
-# FASTEST: No deduplication, incompressible
+# FAST: Incompressible data (1.0x baseline)
 gen = dgen_py.Generator(
     size=100 * 1024**3,
-    dedup_ratio=1.0,      # No dedup (fastest)
-    compress_ratio=1.0    # Incompressible (fastest)
+    dedup_ratio=1.0,      # No dedup (no performance impact)
+    compress_ratio=1.0    # Incompressible data
+)
+
+# FASTER: More compressible (1.3-1.5x speedup)
+gen = dgen_py.Generator(
+    size=100 * 1024**3,
+    dedup_ratio=1.0,      # No dedup (no performance impact)
+    compress_ratio=2.0    # 2:1 compressible data
 )
 ```
 
-Higher ratios reduce throughput:
+**Important**: Higher `compress_ratio` values improve generation performance (1.3-1.5x faster) BUT make the data more compressible, which may not represent your actual workload:
 
-```python
-# SLOWER: With dedup and compression
-gen = dgen_py.Generator(
-    size=100 * 1024**3,
-    dedup_ratio=2.0,      # 2:1 deduplication
-    compress_ratio=3.0    # 3:1 compression
-)
-# Throughput will be lower due to processing overhead
-```
+- **compress_ratio=1.0**: Incompressible data (realistic for encrypted files, compressed archives)
+- **compress_ratio=2.0**: 2:1 compressible data (realistic for text, logs, uncompressed images)
+- **compress_ratio=3.0+**: Highly compressible data (may not be realistic)
+
+**Choose based on YOUR test requirements**, not performance numbers. If testing storage with compression enabled, use compress_ratio=1.0 to avoid inflating storage efficiency metrics.
+
+**Note**: `dedup_ratio` has zero performance impact (< 1% variance)
 
 ### NUMA Modes
 

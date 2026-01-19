@@ -457,11 +457,13 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
                     "NUMA node {} not found, using default thread count",
                     node_id
                 );
-                config.max_threads.unwrap_or_else(num_cpus::get)
+                config.max_threads.unwrap_or_else(get_affinity_cpu_count)
             }
         } else {
-            tracing::warn!("NUMA topology not available, ignoring numa_node parameter");
-            config.max_threads.unwrap_or_else(num_cpus::get)
+            tracing::warn!("NUMA topology not available, falling back to CPU affinity mask");
+            // CRITICAL: When numa_node is specified but topology unavailable,
+            // respect the process's CPU affinity mask (set by Python multiprocessing)
+            config.max_threads.unwrap_or_else(get_affinity_cpu_count)
         }
     } else {
         // No specific NUMA node, use all cores
@@ -701,6 +703,53 @@ fn generate_call_entropy() -> u64 {
 
 #[cfg(all(feature = "numa", feature = "thread-pinning"))]
 use std::collections::HashMap;
+
+/// Get CPU count from current process affinity mask
+/// Falls back to num_cpus::get() if affinity cannot be determined
+fn get_affinity_cpu_count() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        // Try to read /proc/self/status to get Cpus_allowed_list
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("Cpus_allowed_list:") {
+                    if let Some(cpus) = line.split(':').nth(1) {
+                        let cpus = cpus.trim();
+                        let count = parse_cpu_list(cpus);
+                        if count > 0 {
+                            tracing::debug!("CPU affinity mask: {} CPUs ({})", count, cpus);
+                            return count;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback to system CPU count
+    num_cpus::get()
+}
+
+/// Parse Linux CPU list (e.g., "0-23" or "0-11,24-35")
+#[cfg(target_os = "linux")]
+fn parse_cpu_list(cpu_list: &str) -> usize {
+    let mut count = 0;
+    for range in cpu_list.split(',') {
+        let range = range.trim();
+        if range.is_empty() {
+            continue;
+        }
+        
+        if let Some((start, end)) = range.split_once('-') {
+            if let (Ok(s), Ok(e)) = (start.parse::<usize>(), end.parse::<usize>()) {
+                count += (e - s) + 1;
+            }
+        } else if range.parse::<usize>().is_ok() {
+            count += 1;
+        }
+    }
+    count
+}
 
 /// Build CPU affinity map for thread pinning
 #[cfg(all(feature = "numa", feature = "thread-pinning"))]

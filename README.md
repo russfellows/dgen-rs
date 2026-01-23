@@ -2,15 +2,17 @@
 
 **High-performance random data generation with NUMA optimization and zero-copy Python interface**
 
-[![Version](https://img.shields.io/badge/version-0.1.5-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.1.6-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
+[![Tests](https://img.shields.io/badge/tests-5%20passing-success)](https://github.com/russfellows/dgen-rs)
 
 ## Features
 
 - 🚀 **Blazing Fast**: 58+ GB/s streaming throughput, matches Numba JIT performance
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
+- 🔄 **Reproducible Data**: Optional seed parameter for identical data generation across runs
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
 - 🐍 **True Zero-Copy**: Python buffer protocol with direct memory access (no data copying)
 - 📦 **Streaming API**: Generate terabytes of data with constant 32 MB memory usage
@@ -126,6 +128,35 @@ print(f"Throughput: {(100 / duration):.2f} GB/s")
 ```
 Throughput: 86.41 GB/s
 ```
+
+### Reproducible Data Generation (NEW in v0.1.6)
+
+```python
+import dgen_py
+
+# Generate reproducible data with a fixed seed
+gen1 = dgen_py.Generator(
+    size=10 * 1024**3,  # 10 GB
+    seed=12345          # Optional: enables reproducibility
+)
+
+# Same seed produces identical data
+gen2 = dgen_py.Generator(
+    size=10 * 1024**3,
+    seed=12345          # Same seed = identical data
+)
+
+# Without seed (default), data is non-deterministic
+gen3 = dgen_py.Generator(
+    size=10 * 1024**3   # seed=None (default)
+)
+```
+
+**Use cases for reproducible mode:**
+- Reproducible benchmarking and testing
+- Consistent test data across CI/CD runs
+- Debugging with identical data streams
+- Verifiable data generation for compliance
 
 ### System Information
 

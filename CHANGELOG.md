@@ -2,6 +2,56 @@
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
 
+## [0.1.6] - 2026-01-23
+
+### Added
+
+#### Reproducible Data Generation
+- **NEW: `seed` parameter** for `Generator()` constructor
+  - Optional `u64` seed value for reproducible random data streams
+  - When `seed=None` (default): Uses time + urandom entropy (non-deterministic, backward compatible)
+  - When `seed=Some(value)`: Generates identical data for same configuration (reproducible testing)
+  - Enables reproducible benchmarking, testing, and debugging workflows
+
+#### Python API Enhancement
+```python
+# Reproducible mode - same seed produces identical data
+gen1 = dgen_py.Generator(size=10*1024**3, seed=12345)
+gen2 = dgen_py.Generator(size=10*1024**3, seed=12345)
+# gen1 and gen2 will produce identical data
+
+# Non-deterministic mode (default) - different data each time
+gen3 = dgen_py.Generator(size=10*1024**3)  # seed=None (default)
+gen4 = dgen_py.Generator(size=10*1024**3)  # seed=None (default)
+# gen3 and gen4 will produce different data
+```
+
+#### Testing
+- **NEW: `python/examples/test_seed_reproducibility.py`**: Comprehensive test suite
+  - Validates reproducibility with same seed
+  - Confirms non-determinism without seed
+  - Verifies different seeds produce different data
+  - SHA256 hash comparison for data integrity
+
+### Changed
+
+#### Core Implementation
+- Modified `GeneratorConfig` struct to include optional `seed` field
+- Updated `DataGenerator::new()` to use provided seed or generate entropy
+- Enhanced `generate_call_entropy()` usage to be conditional on seed parameter
+
+#### Code Quality
+- Fixed all `clippy::identity_op` warnings in constants
+- Added `#[allow(clippy::too_many_arguments)]` for PyO3 constructor (API requirement)
+- Updated all examples and benchmarks to include new `seed` field
+
+### Backward Compatibility
+- **Fully backward compatible**: `seed` defaults to `None`
+- Existing code continues to work without modification
+- Default behavior unchanged (time + urandom entropy)
+
+---
+
 ## [0.1.5] - 2026-01-19
 
 ### 🎉 Major Performance Improvements

@@ -47,10 +47,11 @@ fn run_test_with_chunk_size(size: usize, iterations: usize, numa_mode: NumaMode,
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode,
         max_threads,
         numa_node: None,
-        block_size: None, // Use default
     };
     
     let mut durations = Vec::new();

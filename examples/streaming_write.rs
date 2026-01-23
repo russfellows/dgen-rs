@@ -14,8 +14,11 @@ fn main() -> std::io::Result<()> {
         size: total_size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Auto,
         max_threads: None,
+        numa_node: None,
     };
     
     let mut gen = DataGenerator::new(config);

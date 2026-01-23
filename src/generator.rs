@@ -278,6 +278,9 @@ pub struct GeneratorConfig {
     /// Larger blocks (16-32 MB) improve throughput by amortizing Rayon overhead
     /// but use more memory. Must be at least 1 MB and at most 32 MB.
     pub block_size: Option<usize>,
+    /// Random seed for reproducible data generation (None = use time + urandom)
+    /// When set, generates identical data for the same seed value
+    pub seed: Option<u64>,
 }
 
 impl Default for GeneratorConfig {
@@ -288,6 +291,7 @@ impl Default for GeneratorConfig {
             compress_factor: 1,
             numa_mode: NumaMode::Auto,
             max_threads: None, // Use all available cores
+            seed: None, // Use time + urandom
             numa_node: None,   // Use all NUMA nodes
             block_size: None,  // Use BLOCK_SIZE constant (4 MB)
         }
@@ -318,6 +322,7 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
         max_threads: None,
         numa_node: None,
         block_size: None,
+        seed: None,
     };
     generate_data(config)
 }
@@ -922,7 +927,8 @@ impl DataGenerator {
             v
         };
 
-        let call_entropy = generate_call_entropy();
+        // Use provided seed or generate entropy from time + urandom
+        let call_entropy = config.seed.unwrap_or_else(generate_call_entropy);
 
         let max_threads = config.max_threads.unwrap_or_else(num_cpus::get);
         
@@ -1199,6 +1205,8 @@ mod tests {
             numa_mode: NumaMode::Auto,
             max_threads: None,
             numa_node: None,
+            block_size: None,
+            seed: None,
         };
 
         eprintln!("Config: {} blocks, {} bytes total", 5, BLOCK_SIZE * 5);

@@ -2,26 +2,53 @@
 
 **High-performance random data generation with NUMA optimization and zero-copy Python interface**
 
-[![Version](https://img.shields.io/badge/version-0.1.5-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.1.6-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
+[![Tests](https://img.shields.io/badge/tests-5%20passing-success)](https://github.com/russfellows/dgen-rs)
 
 ## Features
 
 - 🚀 **Blazing Fast**: 58+ GB/s streaming throughput, matches Numba JIT performance
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
+- 🔄 **Reproducible Data**: Optional seed parameter for identical data generation across runs
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
 - 🐍 **True Zero-Copy**: Python buffer protocol with direct memory access (no data copying)
 - 📦 **Streaming API**: Generate terabytes of data with constant 32 MB memory usage
 - 🧵 **Thread Pool Reuse**: Created once, reused across all operations
 - 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
 
+## Version 0.1.6 Highlights 🎉
+
+**NEW: Reproducible Data Generation**
+- **Optional `seed` parameter** enables identical data generation across runs
+- Perfect for reproducible benchmarking, testing, and CI/CD workflows
+- Fully backward compatible - defaults to non-deterministic (time + urandom)
+
+```python
+# Reproducible mode - same seed produces identical data
+gen = dgen_py.Generator(size=100*1024**3, seed=12345)
+
+# Non-deterministic mode (default) - different data each run
+gen = dgen_py.Generator(size=100*1024**3)  # seed=None
+```
+
+**Use cases:**
+- 🔬 **Reproducible benchmarking**: Compare storage systems with identical workloads
+- ✅ **Consistent testing**: Same test data across CI/CD pipeline runs
+- 🐛 **Debugging**: Regenerate exact data streams for issue investigation
+- 📊 **Compliance**: Verifiable, reproducible data generation for audits
+
+See [Reproducible Data Generation](#reproducible-data-generation-new-in-v016) section below for complete examples.
+
+---
+
 ## Performance
 
-### Version 0.1.5 Highlights 🎉
+### Version 0.1.5 Highlights
 
-**NEW: Significant Performance Improvements** over v0.1.3:
+**Significant Performance Improvements** over v0.1.3:
 - **UMA systems**: ~50% improvement in per-core throughput (10.80 GB/s vs ~7 GB/s)
 - **NUMA systems**: Major improvements from bug fixes in multi-process architecture
 - **8-core system**: **86.41 GB/s** aggregate throughput (C4-16)
@@ -126,6 +153,35 @@ print(f"Throughput: {(100 / duration):.2f} GB/s")
 ```
 Throughput: 86.41 GB/s
 ```
+
+### Reproducible Data Generation (NEW in v0.1.6)
+
+```python
+import dgen_py
+
+# Generate reproducible data with a fixed seed
+gen1 = dgen_py.Generator(
+    size=10 * 1024**3,  # 10 GB
+    seed=12345          # Optional: enables reproducibility
+)
+
+# Same seed produces identical data
+gen2 = dgen_py.Generator(
+    size=10 * 1024**3,
+    seed=12345          # Same seed = identical data
+)
+
+# Without seed (default), data is non-deterministic
+gen3 = dgen_py.Generator(
+    size=10 * 1024**3   # seed=None (default)
+)
+```
+
+**Use cases for reproducible mode:**
+- Reproducible benchmarking and testing
+- Consistent test data across CI/CD runs
+- Debugging with identical data streams
+- Verifiable data generation for compliance
 
 ### System Information
 

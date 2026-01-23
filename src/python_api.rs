@@ -202,6 +202,7 @@ fn generate_buffer(
         max_threads,
         numa_node,  // CRITICAL: Use the parameter to bind to specific NUMA node
         block_size: None,
+        seed: None,
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
@@ -313,6 +314,7 @@ fn generate_into_buffer(
         max_threads,
         numa_node,  // CRITICAL: Bind to specific NUMA node if specified
         block_size: None,
+        seed: None,
     };
 
     // Generate data
@@ -377,13 +379,19 @@ impl PyGenerator {
     /// * `numa_node` - Pin to specific NUMA node (None = use all nodes, 0-N = specific node)
     /// * `chunk_size` - Chunk size for streaming (default: 32 MB for optimal performance)
     /// * `block_size` - Internal parallelization block size (default: 4 MB, max: 32 MB)
+    /// * `seed` - Random seed for reproducible data (None = use time + urandom for non-deterministic)
     /// 
     /// # Note on Ratios
     /// Both dedup_ratio and compress_ratio MUST be integers >= 1.
     /// If floats are provided, they will be truncated with a warning.
     /// Example: 2.7 becomes 2, 1.5 becomes 1
+    /// 
+    /// # Reproducibility
+    /// When seed is provided, Generator produces identical data for the same configuration.
+    /// This enables reproducible testing and benchmarking.
     #[new]
-    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None))]
+    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None, seed=None))]
+    #[allow(clippy::too_many_arguments)]  // PyO3 API requires all parameters as function arguments
     fn new(
         py: Python<'_>,
         size: usize,
@@ -394,6 +402,7 @@ impl PyGenerator {
         numa_node: Option<usize>,
         chunk_size: Option<usize>,
         block_size: Option<usize>,
+        seed: Option<u64>,
     ) -> PyResult<Self> {
         // Warn if floats are being truncated
         if dedup_ratio.fract() != 0.0 {
@@ -439,6 +448,7 @@ impl PyGenerator {
             max_threads,
             numa_node,
             block_size,
+            seed,
         };
 
         let chunk_size = chunk_size.unwrap_or_else(DataGenerator::recommended_chunk_size);

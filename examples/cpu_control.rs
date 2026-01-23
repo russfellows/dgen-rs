@@ -21,8 +21,11 @@ fn main() {
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Auto,
         max_threads: None, // Use all cores
+        numa_node: None,
     };
 
     let start = Instant::now();
@@ -37,8 +40,11 @@ fn main() {
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Auto,
         max_threads: Some(4),
+        numa_node: None,
     };
 
     let start = Instant::now();
@@ -53,8 +59,11 @@ fn main() {
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Auto,
         max_threads: Some(1),
+        numa_node: None,
     };
 
     let start = Instant::now();
@@ -74,8 +83,11 @@ fn main() {
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Auto,
         max_threads: None,
+        numa_node: None,
     };
 
     let start = Instant::now();
@@ -90,8 +102,11 @@ fn main() {
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Force,
         max_threads: None,
+        numa_node: None,
     };
 
     let start = Instant::now();
@@ -106,8 +121,11 @@ fn main() {
         size,
         dedup_factor: 1,
         compress_factor: 1,
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Disabled,
         max_threads: None,
+        numa_node: None,
     };
 
     let start = Instant::now();
@@ -124,8 +142,11 @@ fn main() {
         size,
         dedup_factor: 2,    // 2:1 dedup
         compress_factor: 3, // 3:1 compression
+        block_size: None,
+        seed: None,
         numa_mode: NumaMode::Force,
         max_threads: Some(8),
+        numa_node: None,
     };
 
     let start = Instant::now();

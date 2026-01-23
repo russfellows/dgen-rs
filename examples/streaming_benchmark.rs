@@ -58,8 +58,11 @@ fn main() {
             size: total_size,
             dedup_factor: 1,
             compress_factor: 1,
+            block_size: None,
+            seed: None,
             numa_mode: NumaMode::Auto,
             max_threads: None, // Use all cores
+            numa_node: None,
         };
 
         let mut generator = DataGenerator::new(config);

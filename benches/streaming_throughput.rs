@@ -5,7 +5,7 @@ use dgen_rs::generator::{DataGenerator, GeneratorConfig, NumaMode};
 use std::time::Instant;
 
 const TEST_SIZE: usize = 100 * 1024 * 1024 * 1024; // 100 GB
-const WARMUP_SIZE: usize = 1 * 1024 * 1024 * 1024; // 1 GB
+const WARMUP_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
 const ITERATIONS: usize = 5;
 const CHUNK_SIZE: usize = 32 * 1024 * 1024; // 32 MB chunks for streaming
 
@@ -24,6 +24,7 @@ fn benchmark_block_size(block_size: usize) {
         max_threads: None,
         numa_node: None,
         block_size: Some(block_size),
+        seed: None,
     };
     
     let mut gen = DataGenerator::new(config);
@@ -49,6 +50,7 @@ fn benchmark_block_size(block_size: usize) {
             max_threads: None,
             numa_node: None,
             block_size: Some(block_size),
+            seed: None,
         };
         
         let mut gen = DataGenerator::new(config);
@@ -109,7 +111,7 @@ fn main() {
     let block_sizes = vec![
         256 * 1024,        // 256 KB (128 blocks per 32 MB chunk)
         512 * 1024,        // 512 KB (64 blocks per 32 MB chunk)
-        1 * 1024 * 1024,   // 1 MB (32 blocks per 32 MB chunk)
+        1024 * 1024,       // 1 MB (32 blocks per 32 MB chunk)
     ];
     
     for block_size in block_sizes {

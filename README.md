@@ -19,11 +19,36 @@
 - 🧵 **Thread Pool Reuse**: Created once, reused across all operations
 - 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
 
+## Version 0.1.6 Highlights 🎉
+
+**NEW: Reproducible Data Generation**
+- **Optional `seed` parameter** enables identical data generation across runs
+- Perfect for reproducible benchmarking, testing, and CI/CD workflows
+- Fully backward compatible - defaults to non-deterministic (time + urandom)
+
+```python
+# Reproducible mode - same seed produces identical data
+gen = dgen_py.Generator(size=100*1024**3, seed=12345)
+
+# Non-deterministic mode (default) - different data each run
+gen = dgen_py.Generator(size=100*1024**3)  # seed=None
+```
+
+**Use cases:**
+- 🔬 **Reproducible benchmarking**: Compare storage systems with identical workloads
+- ✅ **Consistent testing**: Same test data across CI/CD pipeline runs
+- 🐛 **Debugging**: Regenerate exact data streams for issue investigation
+- 📊 **Compliance**: Verifiable, reproducible data generation for audits
+
+See [Reproducible Data Generation](#reproducible-data-generation-new-in-v016) section below for complete examples.
+
+---
+
 ## Performance
 
-### Version 0.1.5 Highlights 🎉
+### Version 0.1.5 Highlights
 
-**NEW: Significant Performance Improvements** over v0.1.3:
+**Significant Performance Improvements** over v0.1.3:
 - **UMA systems**: ~50% improvement in per-core throughput (10.80 GB/s vs ~7 GB/s)
 - **NUMA systems**: Major improvements from bug fixes in multi-process architecture
 - **8-core system**: **86.41 GB/s** aggregate throughput (C4-16)

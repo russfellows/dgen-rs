@@ -608,7 +608,8 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
             .for_each(|(i, chunk)| {
                 let ub = i % unique_blocks;
                 tracing::trace!("Filling block {} (unique block {})", i, ub);
-                fill_block(chunk, ub, copy_lens[ub].min(chunk.len()), call_entropy);
+                // Use sequential block index for reproducibility
+                fill_block(chunk, ub, copy_lens[ub].min(chunk.len()), i as u64, call_entropy);
             });
     });
 
@@ -648,17 +649,20 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
 /// - `out`: Output buffer (BLOCK_SIZE bytes)
 /// - `unique_block_idx`: Index of unique block (for RNG seeding)
 /// - `copy_len`: Target bytes to make compressible (filled with zeros)
-/// - `call_entropy`: Per-call RNG seed
-fn fill_block(out: &mut [u8], unique_block_idx: usize, copy_len: usize, call_entropy: u64) {
+/// - `block_sequence`: Sequential block number for RNG derivation
+/// - `seed_base`: Base seed for this generation session
+fn fill_block(out: &mut [u8], unique_block_idx: usize, copy_len: usize, block_sequence: u64, seed_base: u64) {
     tracing::trace!(
-        "fill_block: idx={}, copy_len={}, out_len={}",
+        "fill_block: idx={}, seq={}, copy_len={}, out_len={}",
         unique_block_idx,
+        block_sequence,
         copy_len,
         out.len()
     );
 
-    // Seed RNG uniquely per block
-    let seed = call_entropy ^ ((unique_block_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    // Derive RNG from seed_base + sequential block number
+    // This ensures: same seed_base + same sequence → identical output
+    let seed = seed_base.wrapping_add(block_sequence);
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
     // OPTIMIZED COMPRESSION METHOD (January 2026):
@@ -872,6 +876,7 @@ pub struct DataGenerator {
     unique_blocks: usize,
     copy_lens: Vec<usize>,
     call_entropy: u64,
+    block_sequence: u64,  // Sequential counter for RNG derivation (reset by set_seed)
     max_threads: usize,  // Thread count for parallel generation
     thread_pool: Option<rayon::ThreadPool>,  // Reused thread pool (created once)
     block_size: usize,   // Internal parallelization block size (4-32 MB)
@@ -966,6 +971,7 @@ impl DataGenerator {
             unique_blocks,
             copy_lens,
             call_entropy,
+            block_sequence: 0,  // Start at block 0
             max_threads,
             thread_pool,
             block_size,
@@ -1041,8 +1047,11 @@ impl DataGenerator {
                 &mut block_buf,
                 ub,
                 self.copy_lens[ub].min(self.block_size),
+                self.block_sequence,  // Use current sequence
                 self.call_entropy,
             );
+            
+            self.block_sequence += 1;  // Increment for next block
 
             // Copy needed portion
             chunk[offset..offset + to_copy]
@@ -1087,6 +1096,7 @@ impl DataGenerator {
         let copy_lens = &self.copy_lens;
         let unique_blocks = self.unique_blocks;
         let block_size = self.block_size;
+        let base_sequence = self.block_sequence;  // Capture current sequence
 
         // ZERO-COPY: Generate directly into output buffer using par_chunks_mut
         // This is the same approach as generate_data() - no temporary allocations!
@@ -1097,24 +1107,26 @@ impl DataGenerator {
                 .for_each(|(i, block_chunk)| {
                     let block_idx = start_block + i;
                     let ub = block_idx % unique_blocks;
+                    let block_seq = base_sequence + (i as u64);  // Sequential block number
                     
                     // Handle first block with offset
                     if i == 0 && start_offset > 0 {
                         // Generate full block into temp, copy needed portion
                         let mut temp = vec![0u8; block_size];
-                        fill_block(&mut temp, ub, copy_lens[ub].min(block_size), call_entropy);
+                        fill_block(&mut temp, ub, copy_lens[ub].min(block_size), block_seq, call_entropy);
                         let copy_len = block_size.saturating_sub(start_offset).min(block_chunk.len());
                         block_chunk[..copy_len].copy_from_slice(&temp[start_offset..start_offset + copy_len]);
                     } else {
                         // Generate directly into output buffer (ZERO-COPY!)
                         let actual_len = block_chunk.len().min(block_size);
-                        fill_block(&mut block_chunk[..actual_len], ub, copy_lens[ub].min(actual_len), call_entropy);
+                        fill_block(&mut block_chunk[..actual_len], ub, copy_lens[ub].min(actual_len), block_seq, call_entropy);
                     }
                 });
         });
 
         let to_write = chunk.len();
         self.current_pos += to_write;
+        self.block_sequence += num_blocks as u64;  // Increment sequence for next fill
         
         tracing::debug!(
             "fill_chunk_parallel: ZERO-COPY generated {} blocks ({} MiB) for {} byte chunk",
@@ -1144,6 +1156,54 @@ impl DataGenerator {
     /// Check if generation is complete
     pub fn is_complete(&self) -> bool {
         self.current_pos >= self.total_size
+    }
+
+    /// Set or reset the random seed for subsequent data generation
+    /// 
+    /// This allows changing the data pattern mid-stream while maintaining generation position.
+    /// The new seed takes effect on the next `fill_chunk()` call.
+    /// 
+    /// # Arguments
+    /// * `seed` - New seed value, or None to use time+urandom entropy (non-deterministic)
+    /// 
+    /// # Examples
+    /// ```rust,no_run
+    /// use dgen_rs::{DataGenerator, GeneratorConfig, NumaMode};
+    /// 
+    /// let config = GeneratorConfig {
+    ///     size: 100 * 1024 * 1024,
+    ///     dedup_factor: 1,
+    ///     compress_factor: 1,
+    ///     numa_mode: NumaMode::Auto,
+    ///     max_threads: None,
+    ///     numa_node: None,
+    ///     block_size: None,
+    ///     seed: Some(12345),
+    /// };
+    /// 
+    /// let mut gen = DataGenerator::new(config);
+    /// let mut buffer = vec![0u8; 1024 * 1024];
+    /// 
+    /// // Generate some data with initial seed
+    /// gen.fill_chunk(&mut buffer);
+    /// 
+    /// // Change seed for different pattern
+    /// gen.set_seed(Some(67890));
+    /// gen.fill_chunk(&mut buffer);  // Uses new seed
+    /// 
+    /// // Switch to non-deterministic mode
+    /// gen.set_seed(None);
+    /// gen.fill_chunk(&mut buffer);  // Uses time+urandom
+    /// ```
+    pub fn set_seed(&mut self, seed: Option<u64>) {
+        self.call_entropy = seed.unwrap_or_else(generate_call_entropy);
+        // Reset block sequence counter - this ensures same seed → identical stream
+        self.block_sequence = 0;
+        tracing::debug!(
+            "Seed reset: {} (entropy={}) - block_sequence reset to 0",
+            if seed.is_some() { "deterministic" } else { "non-deterministic" },
+            self.call_entropy
+        );
     }
 
     /// Get recommended chunk size for optimal performance
@@ -1245,5 +1305,120 @@ mod tests {
         );
         assert_eq!(result.len(), config.size);
         assert!(gen.is_complete());
+    }
+
+    #[test]
+    fn test_set_seed_stream_reset() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_buffer(buf: &[u8]) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            buf.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        init_tracing();
+        eprintln!("Testing set_seed() stream reset behavior...");
+
+        let size = 30 * 1024 * 1024; // 30 MB
+        let chunk_size = 10 * 1024 * 1024; // 10 MB chunks
+
+        // Test 1: Same seed sequence produces identical data
+        eprintln!("Test 1: Seed sequence reproducibility");
+        let config = GeneratorConfig {
+            size,
+            dedup_factor: 1,
+            compress_factor: 1,
+            numa_mode: NumaMode::Auto,
+            max_threads: None,
+            numa_node: None,
+            block_size: None,
+            seed: Some(111),
+        };
+
+        // First run with seed sequence: 111 -> 222 -> 333
+        let mut gen1 = DataGenerator::new(config.clone());
+        let mut buf1 = vec![0u8; chunk_size];
+
+        gen1.fill_chunk(&mut buf1);
+        let hash1a = hash_buffer(&buf1);
+
+        gen1.set_seed(Some(222));
+        gen1.fill_chunk(&mut buf1);
+        let hash1b = hash_buffer(&buf1);
+
+        gen1.set_seed(Some(333));
+        gen1.fill_chunk(&mut buf1);
+        let hash1c = hash_buffer(&buf1);
+
+        // Second run with same seed sequence
+        let mut gen2 = DataGenerator::new(config.clone());
+        let mut buf2 = vec![0u8; chunk_size];
+
+        gen2.fill_chunk(&mut buf2);
+        let hash2a = hash_buffer(&buf2);
+
+        gen2.set_seed(Some(222));
+        gen2.fill_chunk(&mut buf2);
+        let hash2b = hash_buffer(&buf2);
+
+        gen2.set_seed(Some(333));
+        gen2.fill_chunk(&mut buf2);
+        let hash2c = hash_buffer(&buf2);
+
+        eprintln!("  Chunk 1: hash1={:016x}, hash2={:016x}", hash1a, hash2a);
+        eprintln!("  Chunk 2: hash1={:016x}, hash2={:016x}", hash1b, hash2b);
+        eprintln!("  Chunk 3: hash1={:016x}, hash2={:016x}", hash1c, hash2c);
+
+        assert_eq!(hash1a, hash2a, "Chunk 1 (seed=111) should match");
+        assert_eq!(hash1b, hash2b, "Chunk 2 (seed=222) should match");
+        assert_eq!(hash1c, hash2c, "Chunk 3 (seed=333) should match");
+
+        // Test 2: Striped pattern (A-B-A-B) reproduces correctly
+        eprintln!("Test 2: Striped pattern creation");
+        let mut gen = DataGenerator::new(GeneratorConfig {
+            size: 40 * 1024 * 1024,
+            dedup_factor: 1,
+            compress_factor: 1,
+            numa_mode: NumaMode::Auto,
+            max_threads: None,
+            numa_node: None,
+            block_size: None,
+            seed: Some(1111),
+        });
+
+        let mut buf = vec![0u8; chunk_size];
+
+        // Stripe 1: A
+        gen.set_seed(Some(1111));
+        gen.fill_chunk(&mut buf);
+        let stripe1_hash = hash_buffer(&buf);
+
+        // Stripe 2: B
+        gen.set_seed(Some(2222));
+        gen.fill_chunk(&mut buf);
+        let stripe2_hash = hash_buffer(&buf);
+
+        // Stripe 3: A (should match Stripe 1)
+        gen.set_seed(Some(1111));
+        gen.fill_chunk(&mut buf);
+        let stripe3_hash = hash_buffer(&buf);
+
+        // Stripe 4: B (should match Stripe 2)
+        gen.set_seed(Some(2222));
+        gen.fill_chunk(&mut buf);
+        let stripe4_hash = hash_buffer(&buf);
+
+        eprintln!("  Stripe 1 (A): {:016x}", stripe1_hash);
+        eprintln!("  Stripe 2 (B): {:016x}", stripe2_hash);
+        eprintln!("  Stripe 3 (A): {:016x}", stripe3_hash);
+        eprintln!("  Stripe 4 (B): {:016x}", stripe4_hash);
+
+        assert_eq!(stripe1_hash, stripe3_hash, "Stripe A should be reproducible");
+        assert_eq!(stripe2_hash, stripe4_hash, "Stripe B should be reproducible");
+        assert_ne!(stripe1_hash, stripe2_hash, "Stripe A and B should differ");
+
+        eprintln!("✅ All stream reset tests passed!");
     }
 }

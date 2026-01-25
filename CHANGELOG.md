@@ -1,7 +1,19 @@
 # Changelog
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
+## [0.1.7] - 2026-01-25
 
+### Added
+- **Stream Reset via `set_seed()` Method**: Dynamically change the random seed during generation to create reproducible data patterns
+  - Calling `set_seed(seed)` resets the data stream to the beginning of that seed's sequence
+  - Functionally equivalent to creating a new generator with minimal overhead
+  - Enables complex patterns: headers/payloads/footers with different seeds, striped patterns for RAID testing
+  - Available in both Rust (`DataGenerator::set_seed()`) and Python (`Generator.set_seed()`)
+  - Comprehensive test coverage: `test_set_seed_stream_reset()` in Rust, `test_set_seed_method.py` in Python
+
+### Changed
+- Internal RNG architecture now uses block sequence counter for deterministic stream reset
+- Block-level RNG derivation ensures same seed always produces identical data stream
 ## [0.1.6] - 2026-01-23
 
 ### Added

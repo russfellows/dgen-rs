@@ -2,15 +2,15 @@
 
 **High-performance random data generation with NUMA optimization and zero-copy Python interface**
 
-[![Version](https://img.shields.io/badge/version-0.1.6-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
-[![Tests](https://img.shields.io/badge/tests-5%20passing-success)](https://github.com/russfellows/dgen-rs)
+[![Tests](https://img.shields.io/badge/tests-6%20passing-success)](https://github.com/russfellows/dgen-rs)
 
 ## Features
 
-- 🚀 **Blazing Fast**: 58+ GB/s streaming throughput, matches Numba JIT performance
+- 🚀 **Blazing Fast**: 10 GB/s per core, up to 300 GB/s verified
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
 - 🔄 **Reproducible Data**: Optional seed parameter for identical data generation across runs
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
@@ -182,6 +182,33 @@ gen3 = dgen_py.Generator(
 - Consistent test data across CI/CD runs
 - Debugging with identical data streams
 - Verifiable data generation for compliance
+
+### Dynamic Seed Changes (NEW in v0.1.7)
+
+```python
+import dgen_py
+
+gen = dgen_py.Generator(size=100 * 1024**3, seed=1111)
+buffer = bytearray(10 * 1024**2)
+
+# Generate data with seed A
+gen.set_seed(1111)
+gen.fill_chunk(buffer)  # Pattern A
+
+# Switch to seed B
+gen.set_seed(2222)
+gen.fill_chunk(buffer)  # Pattern B
+
+# Back to seed A - resets the stream!
+gen.set_seed(1111)
+gen.fill_chunk(buffer)  # SAME as first chunk (pattern A)
+```
+
+**Use cases:**
+- RAID stripe testing with alternating patterns
+- Multi-phase AI/ML workloads (header/payload/footer)
+- Complex reproducible data patterns
+- Low-overhead stream reset
 
 ### System Information
 

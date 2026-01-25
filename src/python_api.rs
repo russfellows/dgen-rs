@@ -551,6 +551,36 @@ impl PyGenerator {
     fn is_complete(&self) -> bool {
         self.inner.is_complete()
     }
+
+    /// Set or reset the random seed for subsequent data generation
+    /// 
+    /// This allows changing the data pattern mid-stream while maintaining generation position.
+    /// The new seed takes effect on the next fill_chunk() call.
+    /// 
+    /// # Arguments
+    /// * `seed` - New seed value (int), or None to use time+urandom entropy (non-deterministic)
+    /// 
+    /// # Example
+    /// ```python
+    /// import dgen_py
+    /// 
+    /// gen = dgen_py.Generator(size=100*1024**3, seed=12345)
+    /// buffer = bytearray(gen.chunk_size)
+    /// 
+    /// # Generate some data with initial seed
+    /// gen.fill_chunk(buffer)
+    /// 
+    /// # Change seed for different pattern
+    /// gen.set_seed(67890)
+    /// gen.fill_chunk(buffer)  # Uses new seed
+    /// 
+    /// # Switch to non-deterministic mode
+    /// gen.set_seed(None)
+    /// gen.fill_chunk(buffer)  # Uses time+urandom
+    /// ```
+    fn set_seed(&mut self, seed: Option<u64>) {
+        self.inner.set_seed(seed);
+    }
 }
 
 // =============================================================================

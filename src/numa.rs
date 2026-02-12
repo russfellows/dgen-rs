@@ -42,15 +42,13 @@ impl NumaTopology {
         tracing::debug!("Detecting NUMA topology via hwlocality...");
 
         let topology = Topology::new()?;
-        
+
         // Get all NUMA nodes
-        let numa_nodes: Vec<_> = topology
-            .objects_with_type(ObjectType::NUMANode)
-            .collect();
-        
+        let numa_nodes: Vec<_> = topology.objects_with_type(ObjectType::NUMANode).collect();
+
         let num_nodes = numa_nodes.len().max(1); // At least 1 node
         let is_uma = num_nodes == 1;
-        
+
         tracing::info!("Detected {} NUMA node(s)", num_nodes);
 
         // Build node details
@@ -62,21 +60,24 @@ impl NumaTopology {
                 memory_gb: 0.0,
             }]
         } else {
-            numa_nodes.iter().filter_map(|node| {
-                let node_id = node.os_index()?;
-                
-                // Get CPUs in this NUMA node's cpuset
-                let cpuset = node.cpuset()?;
-                let cpus: Vec<usize> = (0..topology.objects_with_type(ObjectType::PU).count())
-                    .filter(|&cpu_id| cpuset.is_set(cpu_id))
-                    .collect();
-                
-                Some(NumaNode {
-                    node_id,
-                    cpus,
-                    memory_gb: 0.0, // hwlocality can provide this if needed
+            numa_nodes
+                .iter()
+                .filter_map(|node| {
+                    let node_id = node.os_index()?;
+
+                    // Get CPUs in this NUMA node's cpuset
+                    let cpuset = node.cpuset()?;
+                    let cpus: Vec<usize> = (0..topology.objects_with_type(ObjectType::PU).count())
+                        .filter(|&cpu_id| cpuset.is_set(cpu_id))
+                        .collect();
+
+                    Some(NumaNode {
+                        node_id,
+                        cpus,
+                        memory_gb: 0.0, // hwlocality can provide this if needed
+                    })
                 })
-            }).collect()
+                .collect()
         };
 
         let physical_cores = num_cpus::get_physical();
@@ -118,7 +119,7 @@ impl NumaTopology {
 ///
 /// Cloud VMs typically present as single NUMA node.
 /// Bare metal multi-socket shows 2+ nodes.
-#[allow(dead_code)]  // May be used in future for additional validation
+#[allow(dead_code)] // May be used in future for additional validation
 fn detect_numa_nodes() -> Result<usize> {
     tracing::trace!("detect_numa_nodes called");
 
@@ -173,7 +174,7 @@ fn detect_numa_nodes() -> Result<usize> {
 }
 
 /// Detect detailed NUMA topology using /sys interface
-#[allow(dead_code)]  // May be used in future for detailed topology analysis
+#[allow(dead_code)] // May be used in future for detailed topology analysis
 fn detect_numa_topology_details() -> Result<Vec<NumaNode>> {
     #[cfg(target_os = "linux")]
     {

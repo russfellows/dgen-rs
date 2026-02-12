@@ -44,7 +44,7 @@ impl PyBytesView {
     /// This allows `memoryview(data)` to work directly.
     ///
     /// The buffer is read-only; requesting a writable buffer will raise BufferError.
-    /// 
+    ///
     /// ZERO-COPY: Python accesses NUMA memory directly via raw pointer!
     unsafe fn __getbuffer__(
         slf: PyRef<'_, Self>,
@@ -162,8 +162,10 @@ fn generate_buffer(
         let warnings = py.import("warnings")?;
         warnings.call_method1(
             "warn",
-            (format!("dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
-                     dedup_ratio, truncated),)
+            (format!(
+                "dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)",
+                dedup_ratio, truncated
+            ),),
         )?;
     }
     if compress_ratio.fract() != 0.0 {
@@ -171,11 +173,13 @@ fn generate_buffer(
         let warnings = py.import("warnings")?;
         warnings.call_method1(
             "warn",
-            (format!("compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
-                     compress_ratio, truncated),)
+            (format!(
+                "compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)",
+                compress_ratio, truncated
+            ),),
         )?;
     }
-    
+
     // Convert ratios to integer factors
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
@@ -200,7 +204,7 @@ fn generate_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
-        numa_node,  // CRITICAL: Use the parameter to bind to specific NUMA node
+        numa_node, // CRITICAL: Use the parameter to bind to specific NUMA node
         block_size: None,
         seed: None,
     };
@@ -274,8 +278,10 @@ fn generate_into_buffer(
         let warnings = py.import("warnings")?;
         warnings.call_method1(
             "warn",
-            (format!("dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
-                     dedup_ratio, truncated),)
+            (format!(
+                "dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)",
+                dedup_ratio, truncated
+            ),),
         )?;
     }
     if compress_ratio.fract() != 0.0 {
@@ -283,8 +289,10 @@ fn generate_into_buffer(
         let warnings = py.import("warnings")?;
         warnings.call_method1(
             "warn",
-            (format!("compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
-                     compress_ratio, truncated),)
+            (format!(
+                "compress_ratio={:.2} truncated to integer {} (fractional ratios not supported)",
+                compress_ratio, truncated
+            ),),
         )?;
     }
 
@@ -312,7 +320,7 @@ fn generate_into_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
-        numa_node,  // CRITICAL: Bind to specific NUMA node if specified
+        numa_node, // CRITICAL: Bind to specific NUMA node if specified
         block_size: None,
         seed: None,
     };
@@ -363,7 +371,7 @@ fn generate_into_buffer(
 #[pyclass(name = "Generator")]
 struct PyGenerator {
     inner: DataGenerator,
-    chunk_size: usize,  // Recommended chunk size for fill_chunk() calls
+    chunk_size: usize, // Recommended chunk size for fill_chunk() calls
 }
 
 #[pymethods]
@@ -380,18 +388,18 @@ impl PyGenerator {
     /// * `chunk_size` - Chunk size for streaming (default: 32 MB for optimal performance)
     /// * `block_size` - Internal parallelization block size (default: 4 MB, max: 32 MB)
     /// * `seed` - Random seed for reproducible data (None = use time + urandom for non-deterministic)
-    /// 
+    ///
     /// # Note on Ratios
     /// Both dedup_ratio and compress_ratio MUST be integers >= 1.
     /// If floats are provided, they will be truncated with a warning.
     /// Example: 2.7 becomes 2, 1.5 becomes 1
-    /// 
+    ///
     /// # Reproducibility
     /// When seed is provided, Generator produces identical data for the same configuration.
     /// This enables reproducible testing and benchmarking.
     #[new]
     #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None, seed=None))]
-    #[allow(clippy::too_many_arguments)]  // PyO3 API requires all parameters as function arguments
+    #[allow(clippy::too_many_arguments)] // PyO3 API requires all parameters as function arguments
     fn new(
         py: Python<'_>,
         size: usize,
@@ -410,8 +418,10 @@ impl PyGenerator {
             let warnings = py.import("warnings")?;
             warnings.call_method1(
                 "warn",
-                (format!("dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)", 
-                         dedup_ratio, truncated),)
+                (format!(
+                    "dedup_ratio={:.2} truncated to integer {} (fractional ratios not supported)",
+                    dedup_ratio, truncated
+                ),),
             )?;
         }
         if compress_ratio.fract() != 0.0 {
@@ -423,7 +433,7 @@ impl PyGenerator {
                          compress_ratio, truncated),)
             )?;
         }
-        
+
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
 
@@ -553,27 +563,27 @@ impl PyGenerator {
     }
 
     /// Set or reset the random seed for subsequent data generation
-    /// 
+    ///
     /// This allows changing the data pattern mid-stream while maintaining generation position.
     /// The new seed takes effect on the next fill_chunk() call.
-    /// 
+    ///
     /// # Arguments
     /// * `seed` - New seed value (int), or None to use time+urandom entropy (non-deterministic)
-    /// 
+    ///
     /// # Example
     /// ```python
     /// import dgen_py
-    /// 
+    ///
     /// gen = dgen_py.Generator(size=100*1024**3, seed=12345)
     /// buffer = bytearray(gen.chunk_size)
-    /// 
+    ///
     /// # Generate some data with initial seed
     /// gen.fill_chunk(buffer)
-    /// 
+    ///
     /// # Change seed for different pattern
     /// gen.set_seed(67890)
     /// gen.fill_chunk(buffer)  # Uses new seed
-    /// 
+    ///
     /// # Switch to non-deterministic mode
     /// gen.set_seed(None)
     /// gen.fill_chunk(buffer)  # Uses time+urandom
@@ -665,12 +675,12 @@ fn get_numa_info(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// ```
 #[pyfunction]
 fn create_bytearrays(py: Python<'_>, count: usize, size: usize) -> PyResult<Py<PyAny>> {
-    use pyo3::types::{PyByteArray, PyList};
     use pyo3::ffi;
-    
+    use pyo3::types::{PyByteArray, PyList};
+
     // Create Python list to hold bytearrays
     let list = PyList::empty(py);
-    
+
     // Pre-allocate bytearrays using PyByteArray C API
     // For large allocations (our 32 MB chunks), Python's allocator delegates to system malloc,
     // which automatically uses mmap for allocations >= 128 KB (glibc MMAP_THRESHOLD)
@@ -680,25 +690,26 @@ fn create_bytearrays(py: Python<'_>, count: usize, size: usize) -> PyResult<Py<P
             let ba_ptr = ffi::PyByteArray_FromStringAndSize(std::ptr::null(), 0);
             if ba_ptr.is_null() {
                 return Err(pyo3::exceptions::PyMemoryError::new_err(
-                    "Failed to create bytearray"
+                    "Failed to create bytearray",
                 ));
             }
-            
+
             // Resize to desired size
             // For 32 MB chunks: Python -> PyMem_Realloc -> malloc -> mmap (automatic!)
             if ffi::PyByteArray_Resize(ba_ptr, size as isize) < 0 {
                 ffi::Py_DECREF(ba_ptr);
-                return Err(pyo3::exceptions::PyMemoryError::new_err(
-                    format!("Failed to resize bytearray to {} bytes", size)
-                ));
+                return Err(pyo3::exceptions::PyMemoryError::new_err(format!(
+                    "Failed to resize bytearray to {} bytes",
+                    size
+                )));
             }
-            
+
             // Wrap in PyByteArray
             let ba: Bound<'_, PyByteArray> = Bound::from_owned_ptr(py, ba_ptr).cast_into()?;
             list.append(ba)?;
         }
     }
-    
+
     Ok(list.into())
 }
 

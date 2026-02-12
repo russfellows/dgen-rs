@@ -28,6 +28,9 @@ jobs:
         with:
           toolchain: '1.90'
       
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libhwloc-dev
+      
       - name: Build (Rust)
         run: cargo build --release
       
@@ -55,6 +58,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libhwloc-dev
       
       - name: Check formatting
         run: cargo fmt --all -- --check

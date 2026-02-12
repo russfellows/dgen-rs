@@ -1,7 +1,7 @@
 // Benchmark for streaming data generation throughput
 // Tests different block sizes to find optimal performance
 
-use dgen_rs::generator::{DataGenerator, GeneratorConfig, NumaMode};
+use dgen_data::generator::{DataGenerator, GeneratorConfig, NumaMode};
 use std::time::Instant;
 
 const TEST_SIZE: usize = 100 * 1024 * 1024 * 1024; // 100 GB
@@ -98,7 +98,7 @@ fn main() {
     // Get system info
     #[cfg(feature = "numa")]
     {
-        use dgen_rs::numa::NumaTopology;
+        use dgen_data::numa::NumaTopology;
         if let Ok(topology) = NumaTopology::detect() {
             println!("System Configuration:");
             println!("  NUMA nodes: {}", topology.num_nodes);

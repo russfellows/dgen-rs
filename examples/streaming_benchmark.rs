@@ -7,7 +7,7 @@
 //! This measures pure generation speed without Python overhead.
 //! Use this to verify generation can exceed storage bandwidth (80+ GB/s target).
 
-use dgen_rs::{DataGenerator, GeneratorConfig, NumaMode};
+use dgen_data::{DataGenerator, GeneratorConfig, NumaMode};
 use std::time::Instant;
 
 fn format_throughput(bytes: usize, duration_secs: f64) -> String {

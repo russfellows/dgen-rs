@@ -1,7 +1,7 @@
 // Generate streaming data and write to file - stays in Rust (no Python GIL overhead)
 // This will be exposed to Python via PyO3
 
-use dgen_rs::{DataGenerator, GeneratorConfig, NumaMode};
+use dgen_data::{DataGenerator, GeneratorConfig, NumaMode};
 use std::fs::File;
 use std::io::Write;
 use std::time::Instant;

@@ -4,7 +4,7 @@
 
 //! Example demonstrating CPU count and NUMA mode control
 
-use dgen_rs::{generate_data, GeneratorConfig, NumaMode};
+use dgen_data::{generate_data, GeneratorConfig, NumaMode};
 use std::time::Instant;
 
 fn main() {

@@ -301,7 +301,7 @@ impl Default for GeneratorConfig {
 ///
 /// # Example
 /// ```rust
-/// use dgen_rs::generate_data_simple;
+/// use dgen_data::generate_data_simple;
 ///
 /// // Generate 100 MiB incompressible data with no deduplication
 /// let data = generate_data_simple(100 * 1024 * 1024, 1, 1);
@@ -1206,7 +1206,7 @@ impl DataGenerator {
     ///
     /// # Examples
     /// ```rust,no_run
-    /// use dgen_rs::{DataGenerator, GeneratorConfig, NumaMode};
+    /// use dgen_data::{DataGenerator, GeneratorConfig, NumaMode};
     ///
     /// let config = GeneratorConfig {
     ///     size: 100 * 1024 * 1024,

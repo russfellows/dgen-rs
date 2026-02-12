@@ -1,4 +1,4 @@
-use dgen_rs::{DataGenerator, GeneratorConfig, NumaMode};
+use dgen_data::{DataGenerator, GeneratorConfig, NumaMode};
 use std::time::Instant;
 
 fn main() {

@@ -8,6 +8,14 @@ No memcpy between Rust and Python - same performance as numpy!
 from typing import Optional
 import sys
 
+# Get version from package metadata (automatically syncs with pyproject.toml)
+try:
+    from importlib.metadata import version
+    __version__ = version("dgen-py")
+except Exception:
+    # Fallback for development/editable installs
+    __version__ = "unknown"
+
 # Import Rust extension module
 try:
     from ._dgen_rs import (
@@ -15,6 +23,7 @@ try:
         generate_buffer,
         generate_into_buffer,
         Generator,
+        create_bytearrays,
     )
     
     # Try to import NUMA info (may not be available on all platforms)
@@ -32,7 +41,6 @@ except ImportError as e:
         "  cd dgen-rs && maturin develop --release"
     )
 
-__version__ = "0.1.1"
 __all__ = [
     "BytesView",
     "generate_buffer",
@@ -40,6 +48,7 @@ __all__ = [
     "generate_into_buffer",
     "fill_buffer",
     "Generator",
+    "create_bytearrays",
     "get_numa_info",
     "get_system_info",
 ]

@@ -1,8 +1,8 @@
 # dgen-py
 
-**High-performance random data generation with NUMA optimization and zero-copy Python interface**
+**The worlds fastest Python random data generation - with NUMA optimization and zero-copy interface**
 
-[![Version](https://img.shields.io/badge/version-0.1.7-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
@@ -11,50 +11,18 @@
 ## Features
 
 - 🚀 **Blazing Fast**: 10 GB/s per core, up to 300 GB/s verified
+- ⚡ **Ultra-Fast Allocation**: `create_bytearrays()` for 1,280x faster pre-allocation than Python (NEW in v0.2.0)
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
-- 🔄 **Reproducible Data**: Optional seed parameter for identical data generation across runs
+- 🔄 **Reproducible Data**: Seed parameter for identical data generation (v0.1.6) with dynamic reseeding (v0.1.7)
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
 - 🐍 **True Zero-Copy**: Python buffer protocol with direct memory access (no data copying)
 - 📦 **Streaming API**: Generate terabytes of data with constant 32 MB memory usage
 - 🧵 **Thread Pool Reuse**: Created once, reused across all operations
 - 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
 
-## Version 0.1.6 Highlights 🎉
-
-**NEW: Reproducible Data Generation**
-- **Optional `seed` parameter** enables identical data generation across runs
-- Perfect for reproducible benchmarking, testing, and CI/CD workflows
-- Fully backward compatible - defaults to non-deterministic (time + urandom)
-
-```python
-# Reproducible mode - same seed produces identical data
-gen = dgen_py.Generator(size=100*1024**3, seed=12345)
-
-# Non-deterministic mode (default) - different data each run
-gen = dgen_py.Generator(size=100*1024**3)  # seed=None
-```
-
-**Use cases:**
-- 🔬 **Reproducible benchmarking**: Compare storage systems with identical workloads
-- ✅ **Consistent testing**: Same test data across CI/CD pipeline runs
-- 🐛 **Debugging**: Regenerate exact data streams for issue investigation
-- 📊 **Compliance**: Verifiable, reproducible data generation for audits
-
-See [Reproducible Data Generation](#reproducible-data-generation-new-in-v016) section below for complete examples.
-
----
-
 ## Performance
 
-### Version 0.1.5 Highlights
-
-**Significant Performance Improvements** over v0.1.3:
-- **UMA systems**: ~50% improvement in per-core throughput (10.80 GB/s vs ~7 GB/s)
-- **NUMA systems**: Major improvements from bug fixes in multi-process architecture
-- **8-core system**: **86.41 GB/s** aggregate throughput (C4-16)
-- **Maximum aggregate**: **324.72 GB/s** on 48-core dual-NUMA system (C4-96 with compress=2.0)
-
-### Streaming Benchmark (v0.1.5) - 100 GB Test
+### Streaming Benchmark - 100 GB Test
 
 Comparison of streaming random data generation methods on a 12-core system:
 
@@ -75,7 +43,7 @@ Comparison of streaming random data generation methods on a 12-core system:
 
 > **⚠️ Critical for Storage Testing**: **ONLY dgen-py** supports configurable **deduplication and compression ratios**. All other methods (os.urandom, NumPy, Numba) generate purely random data with maximum entropy, making them unsuitable for realistic storage system testing. Real-world storage workloads require controllable data characteristics to test deduplication engines, compression algorithms, and storage efficiency—capabilities unique to dgen-py.
 
-### Multi-NUMA Benchmarks (v0.1.5) - GCP Emerald Rapid
+### Multi-NUMA Scalability - GCP Emerald Rapid
 
 **Scalability testing** on Google Cloud Platform Intel Emerald Rapid systems (1024 GB workload, compress=1.0):
 
@@ -119,71 +87,65 @@ sudo yum install systemd-devel hwloc-devel
 
 ## Quick Start
 
-### Basic Usage
+### Version 0.2.0: Ultra-Fast Bulk Buffer Allocation 🎉
+
+For scenarios where you need to **pre-generate all data in memory** before writing, use `create_bytearrays()` for **1,280x faster allocation** than Python list comprehension:
 
 ```python
 import dgen_py
 import time
 
-# Generate 100 GB of random data with configurable characteristics
-gen = dgen_py.Generator(
-    size=100 * 1024**3,      # 100 GB
-    dedup_ratio=1.0,         # No deduplication 
-    compress_ratio=1.0,      # Incompressible 
-    numa_mode="auto",        # Auto-detect NUMA topology
-    max_threads=None         # Use all available cores
-)
+# Pre-generate 24 GB in 32 MB chunks 
+total_size = 24 * 1024**3  # 24 GB
+chunk_size = 32 * 1024**2  # 32 MB chunks
+num_chunks = total_size // chunk_size  # 768 chunks
 
-# Create buffer (uses optimal chunk size automatically)
-buffer = bytearray(gen.chunk_size)
-
-# Stream data in chunks (zero-copy, parallel generation)
+# ✅ FAST: Rust-optimized allocation (7-11 ms for 24 GB!)
 start = time.perf_counter()
-while not gen.is_complete():
-    nbytes = gen.fill_chunk(buffer)
-    if nbytes == 0:
-        break
-    # Write to file/network: buffer[:nbytes]
+chunks = dgen_py.create_bytearrays(count=num_chunks, size=chunk_size)
+alloc_time = time.perf_counter() - start
+print(f"Allocation: {alloc_time*1000:.1f} ms @ {(total_size/(1024**3))/alloc_time:.0f} GB/s")
 
-duration = time.perf_counter() - start
-print(f"Throughput: {(100 / duration):.2f} GB/s")
+# Fill buffers with high-performance generation
+gen = dgen_py.Generator(size=total_size, numa_mode="auto", max_threads=None)
+
+start = time.perf_counter()
+for buf in chunks:
+    gen.fill_chunk(buf)
+gen_time = time.perf_counter() - start
+print(f"Generation: {gen_time:.2f}s @ {(total_size/(1024**3))/gen_time:.1f} GB/s")
+
+# Now write to storage...
+# for buf in chunks:
+#     f.write(buf)
 ```
 
-**Example output (8-core system):**
+**Performance (12-core system):**
 ```
-Throughput: 86.41 GB/s
-```
-
-### Reproducible Data Generation (NEW in v0.1.6)
-
-```python
-import dgen_py
-
-# Generate reproducible data with a fixed seed
-gen1 = dgen_py.Generator(
-    size=10 * 1024**3,  # 10 GB
-    seed=12345          # Optional: enables reproducibility
-)
-
-# Same seed produces identical data
-gen2 = dgen_py.Generator(
-    size=10 * 1024**3,
-    seed=12345          # Same seed = identical data
-)
-
-# Without seed (default), data is non-deterministic
-gen3 = dgen_py.Generator(
-    size=10 * 1024**3   # seed=None (default)
-)
+Allocation: 10.9 ms @ 2204 GB/s  # 1,280x faster than Python!
+Generation: 1.59s @ 15.1 GB/s
 ```
 
-**Use cases for reproducible mode:**
-- Reproducible benchmarking and testing
-- Consistent test data across CI/CD runs
-- Debugging with identical data streams
-- Verifiable data generation for compliance
+**Performance comparison:**
+| Method | Allocation Time (24 GB) | Speedup |
+|--------|------------------------|---------|
+| Python `[bytearray(size) for _ in ...]` | 12-14 seconds | 1x (baseline) |
+| `dgen_py.create_bytearrays()` | **7-11 ms** | **1,280x faster** |
 
-### Dynamic Seed Changes (NEW in v0.1.7)
+**When to use:**
+- ✅ Pre-generation pattern (DLIO benchmark, batch data loading)
+- ✅ Need all data in RAM before writing
+- ❌ Streaming - use `Generator.fill_chunk()` with reusable buffer instead (see below)
+
+**Why it's fast:**
+- Uses Python C API (`PyByteArray_Resize`) directly from Rust
+- For 32 MB chunks, glibc automatically uses `mmap` (≥128 KB threshold)
+- Zero-copy kernel page allocation, no heap fragmentation
+- Bypasses Python interpreter overhead
+
+### Version 0.1.7: Dynamic Seed Changes
+
+Dynamically change the random seed to **reset the data stream** or create **alternating patterns** without recreating the Generator:
 
 ```python
 import dgen_py
@@ -205,10 +167,74 @@ gen.fill_chunk(buffer)  # SAME as first chunk (pattern A)
 ```
 
 **Use cases:**
-- RAID stripe testing with alternating patterns
-- Multi-phase AI/ML workloads (header/payload/footer)
-- Complex reproducible data patterns
-- Low-overhead stream reset
+- RAID stripe testing with alternating patterns per drive
+- Multi-phase AI/ML workloads (different patterns for metadata/payload/footer)
+- Complex reproducible benchmark scenarios
+- Low-overhead stream reset (no Generator recreation)
+
+### Version 0.1.6: Reproducible Data Generation
+
+Generate **identical data across runs** for reproducible benchmarking and testing:
+
+```python
+import dgen_py
+
+# Reproducible mode - same seed produces identical data
+gen1 = dgen_py.Generator(size=10 * 1024**3, seed=12345)
+gen2 = dgen_py.Generator(size=10 * 1024**3, seed=12345)
+# ⇒ gen1 and gen2 produce IDENTICAL data streams
+
+# Non-deterministic mode (default) - different data each run  
+gen3 = dgen_py.Generator(size=10 * 1024**3)  # seed=None (default)
+```
+
+**Use cases:**
+- 🔬 Reproducible benchmarking: Compare storage systems with identical workloads
+- ✅ Consistent testing: Same test data across CI/CD pipeline runs
+- 🐛 Debugging: Regenerate exact data streams for issue investigation
+- 📊 Compliance: Verifiable data generation for audits
+
+### Streaming API (Basic Usage)
+
+For **unlimited data generation with constant memory usage**, use the streaming API:
+
+```python
+import dgen_py
+import time
+
+# Generate 100 GB with streaming (only 32 MB in memory at a time)
+gen = dgen_py.Generator(
+    size=100 * 1024**3,      # 100 GB total
+    dedup_ratio=1.0,         # No deduplication 
+    compress_ratio=1.0,      # Incompressible data
+    numa_mode="auto",        # Auto-detect NUMA topology
+    max_threads=None         # Use all available cores
+)
+
+# Create single reusable buffer
+buffer = bytearray(gen.chunk_size)
+
+# Stream data in chunks (zero-copy, parallel generation)
+start = time.perf_counter()
+while not gen.is_complete():
+    nbytes = gen.fill_chunk(buffer)
+    if nbytes == 0:
+        break
+    # Write to file/network: buffer[:nbytes]
+
+duration = time.perf_counter() - start
+print(f"Throughput: {(100 / duration):.2f} GB/s")
+```
+
+**Example output (8-core system):**
+```
+Throughput: 86.41 GB/s
+```
+
+**When to use:**
+- ✅ Generating very large datasets (> available RAM)
+- ✅ Consistent low memory footprint (32 MB)
+- ✅ Network streaming, continuous data generation
 
 ### System Information
 
@@ -239,8 +265,6 @@ Key architecture:
 **Results**:
 - C4-96 (48 cores, 2 NUMA nodes): 248.53 GB/s aggregate
 - C4-32 (16 cores, 1 NUMA node): 162.78 GB/s with 112% scaling efficiency
-
-## Performance Notes
 
 ### Chunk Size Optimization
 

@@ -29,7 +29,7 @@ jobs:
           toolchain: '1.90'
       
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libhwloc-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhwloc-dev
       
       - name: Build (Rust)
         run: cargo build --release
@@ -60,7 +60,7 @@ jobs:
           components: rustfmt, clippy
       
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libhwloc-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhwloc-dev
       
       - name: Check formatting
         run: cargo fmt --all -- --check

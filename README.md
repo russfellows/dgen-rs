@@ -2,10 +2,10 @@
 
 **The worlds fastest Python random data generation - with NUMA optimization and zero-copy interface**
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
-[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
+[![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
 [![Tests](https://img.shields.io/badge/tests-6%20passing-success)](https://github.com/russfellows/dgen-rs)
 
 ## Features
@@ -72,9 +72,33 @@ Comparison of streaming random data generation methods on a 12-core system:
 pip install dgen-py
 ```
 
+Default PyPI wheels are built without NUMA/hwloc support so they remain broadly compatible across Linux distributions.
+
+### Python Version Support
+
+- Supported: Python 3.11+
+- Not supported: Python 3.10 and older
+
+### Enable NUMA Support (Source Build)
+
+NUMA-aware topology and NUMA-local allocation require building from source with the `numa` feature.
+
+```bash
+# System deps (Linux)
+# Ubuntu/Debian:
+sudo apt-get install libudev-dev libhwloc-dev
+
+# RHEL/CentOS/Fedora:
+sudo yum install systemd-devel hwloc-devel
+
+# Build from source with NUMA enabled
+pip install --no-binary dgen-py dgen-py \
+    --config-settings=build-args="--features python-bindings,numa,thread-pinning"
+```
+
 ### System Requirements
 
-**For NUMA support (Linux only):**
+**For source builds with NUMA support (Linux only):**
 ```bash
 # Ubuntu/Debian
 sudo apt-get install libudev-dev libhwloc-dev
@@ -83,7 +107,7 @@ sudo apt-get install libudev-dev libhwloc-dev
 sudo yum install systemd-devel hwloc-devel
 ```
 
-**Note**: NUMA support is optional. Without these libraries, the package works perfectly on single-NUMA systems (workstations, cloud VMs).
+**Note**: Without NUMA/hwloc, dgen-py still delivers high performance on UMA and single-node cloud systems. The limitation is on true multi-NUMA systems where NUMA-local memory placement and topology-aware optimization are not available.
 
 ## Quick Start
 

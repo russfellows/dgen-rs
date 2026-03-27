@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
+
+## [0.2.2] - 2026-03-27
+
+### Changed
+- Default wheel builds now ship without NUMA/hwloc support to improve compatibility across Linux environments.
+- NUMA support is now documented as an opt-in source build path using Cargo features.
+- Python support policy updated to Python 3.11+; Python 3.10 is no longer supported.
+
+## [0.2.1] - 2026-03-26
+
+### Changed
+- Wheel builds now explicitly target Python 3.10+. The `requires-python = ">=3.10"` constraint is enforced in `pyproject.toml`. Build separate wheels per Python version with `maturin build --release -i python3.10` and `maturin build --release -i python3.11`.
+
 ## [0.1.7] - 2026-01-25
 
 ### Added

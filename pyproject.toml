@@ -1,9 +1,9 @@
 [project]
 name = "dgen-py"
-version = "0.2.0"
+version = "0.2.2"
 description = "The world's fastest Python random data generation - with NUMA optimization and zero-copy interface"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.21.0",
     "zstandard>=0.25.0",
@@ -16,7 +16,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Rust",

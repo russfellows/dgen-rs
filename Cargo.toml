@@ -1,6 +1,6 @@
 [package]
 name = "dgen-data"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 authors = ["Russ Fellows <russ.fellows@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -31,6 +31,10 @@ rayon = "1.10"  # Parallel data generation
 bytes = "^1.10"  # Zero-copy buffer type for Python integration
 
 # PyO3 for Python bindings
+# Note: The "abi3-py311" feature enables building a single wheel compatible 
+#       with Python 3.11+ without recompilation, but it requires 
+#      careful handling of C API usage to maintain compatibility.
+# Therefore, for maximum compatibility, we use the "extension-module" feature
 pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 
 # NUMA topology detection and thread pinning
@@ -51,7 +55,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.20"
 
 [features]
-default = ["python-bindings", "numa", "thread-pinning"]
+# Keep NUMA support opt-in to avoid hwloc/glibc runtime coupling in default wheels.
+default = ["python-bindings", "thread-pinning"]
 python-bindings = ["pyo3"]
 numa = ["hwlocality"]
 thread-pinning = ["core_affinity"]

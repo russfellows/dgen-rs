@@ -86,7 +86,7 @@ After ~10-15 minutes, check:
 ### Build Matrix
 
 The workflow creates wheels for:
-- **Python versions**: 3.8, 3.9, 3.10, 3.11, 3.12 (via `--find-interpreter`)
+- **Python versions**: 3.11 and 3.12 (via `--find-interpreter`)
 - **Platforms**: Linux (x86_64, aarch64), Windows (x64, x86), macOS (x86_64, aarch64)
 - **Total**: ~30-40 wheel files per release
 

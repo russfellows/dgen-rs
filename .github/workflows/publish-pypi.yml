@@ -14,25 +14,26 @@ jobs:
     strategy:
       matrix:
         target: [x86_64]
+        python-version: ['3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v4
       
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --no-default-features --features python-bindings,thread-pinning
+          args: --release --out dist --find-interpreter --features python-bindings
           sccache: 'true'
           manylinux: '2_28'
       
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.target }}
+          name: wheels-linux-${{ matrix.target }}-${{ matrix.python-version }}
           path: dist
 
   sdist:

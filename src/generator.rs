@@ -159,9 +159,20 @@ impl DataBuffer {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn truncate(&mut self, size: usize) {
         match self {
             DataBuffer::Uma(vec) => vec.truncate(size),
+        }
+    }
+
+    /// Convert to bytes::Bytes (ZERO-COPY: wraps the Vec without copying)
+    pub fn into_bytes(self) -> bytes::Bytes {
+        match self {
+            DataBuffer::Uma(vec) => bytes::Bytes::from(vec),
         }
     }
 }
@@ -503,9 +514,6 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
         false
     };
 
-    #[cfg(not(feature = "numa"))]
-    let should_optimize_numa = false;
-
     tracing::debug!("Starting parallel generation with rayon");
 
     // Build thread pool with optional NUMA-aware thread pinning
@@ -742,6 +750,7 @@ use std::collections::HashMap;
 
 /// Get CPU count from current process affinity mask
 /// Falls back to num_cpus::get() if affinity cannot be determined
+#[cfg(feature = "numa")]
 fn get_affinity_cpu_count() -> usize {
     #[cfg(target_os = "linux")]
     {
@@ -767,7 +776,7 @@ fn get_affinity_cpu_count() -> usize {
 }
 
 /// Parse Linux CPU list (e.g., "0-23" or "0-11,24-35")
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "numa", target_os = "linux"))]
 fn parse_cpu_list(cpu_list: &str) -> usize {
     let mut count = 0;
     for range in cpu_list.split(',') {

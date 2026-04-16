@@ -1,6 +1,6 @@
 [package]
 name = "dgen-data"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Russ Fellows <russ.fellows@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -14,14 +14,35 @@ categories = ["development-tools::profiling", "algorithms"]
 name = "dgen_data"
 crate-type = ["cdylib", "rlib"]  # cdylib for Python bindings, rlib for Rust usage
 
-[[bin]]
+[[bench]]
 name = "streaming-bench"
 path = "benches/streaming_throughput.rs"
+harness = false  # standalone benchmark with its own main(), not a criterion harness
 
 [[example]]
 name = "numa-test"
 path = "examples/numa_test.rs"
 required-features = ["numa"]
+
+[[example]]
+name = "small-object-bench"
+path = "examples/small_object_bench.rs"
+required-features = []
+
+[[example]]
+name = "rust-speed-probe"
+path = "examples/rust_speed_probe.rs"
+required-features = []
+
+[[example]]
+name = "speed-table"
+path = "examples/speed_table.rs"
+required-features = []
+
+[[example]]
+name = "bench-10gb"
+path = "examples/bench_10gb.rs"
+required-features = []
 
 [dependencies]
 # RNG and data generation
@@ -56,9 +77,11 @@ tempfile = "3.20"
 
 [features]
 # Keep NUMA support opt-in to avoid hwloc/glibc runtime coupling in default wheels.
-default = ["python-bindings", "thread-pinning"]
+# thread-pinning requires numa: pinning threads to specific cores only makes sense
+# when NUMA topology is available to determine which cores to pin to.
+default = ["python-bindings"]
 python-bindings = ["pyo3"]
-numa = ["hwlocality"]
+numa = ["hwlocality", "thread-pinning"]  # thread-pinning is a sub-feature of numa
 thread-pinning = ["core_affinity"]
 
 [profile.release]

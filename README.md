@@ -2,7 +2,7 @@
 
 **The worlds fastest Python random data generation - with NUMA optimization and zero-copy interface**
 
-[![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.2.3-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
@@ -11,7 +11,9 @@
 ## Features
 
 - 🚀 **Blazing Fast**: 10 GB/s per core, up to 300 GB/s verified
-- ⚡ **Ultra-Fast Allocation**: `create_bytearrays()` for 1,280x faster pre-allocation than Python (NEW in v0.2.0)
+- ⚡ **Ultra-Fast Allocation**: `create_bytearrays()` for 1,280x faster pre-allocation than Python (v0.2.0)
+- 🔁 **Zero-Copy Rolling Pool**: `generate_buffer()` auto-uses a rolling pool for small objects — 16× speedup for 64 KB objects with no API change (NEW in v0.2.3)
+- 🏊 **Explicit Pool API**: `BufferPool` class for tight loops — pre-generate once, serve millions of slices (NEW in v0.2.3)
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
 - 🔄 **Reproducible Data**: Seed parameter for identical data generation (v0.1.6) with dynamic reseeding (v0.1.7)
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
@@ -21,6 +23,48 @@
 - 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
 
 ## Performance
+
+### API Throughput by Object Size — v0.2.3 (12-vCPU VM, 31 GB RAM)
+
+Two usage patterns are benchmarked; run `cargo run --release --example speed-table` (Rust)
+or `python examples/speed_table.py` (Python) to reproduce on your hardware.
+
+**Per-object**: One generation call per object, called repeatedly in a tight loop.
+Only generation time is measured; buffer deallocation (`munmap`/`free`) happens outside
+the timer. Three implementations compared:
+- `≤ 1 MB` **dgen-py**: `BufferPool.next_slice()` — zero-copy slice from pre-generated block
+- `> 1 MB` **dgen-py**: `Generator(size).get_chunk()` — new Rayon thread pool per call
+- **NumPy**: `np.random.default_rng().random(N//8)` — PCG64 float64, rng reused, single-threaded
+
+**Streaming (dgen-py only)**: One `Generator` for the entire run, 32 MB chunks.
+Thread pool created **once** and reused for every `fill_chunk()` call. NumPy has no
+equivalent streaming API.
+
+| Object | Rust per-obj | dgen-py per-obj | NumPy per-obj | dgen-py stream |
+|--------|:------------:|:---------------:|:-------------:|:--------------:|
+| 64 B   |   894 MB/s   |    228 MB/s     |    73 MB/s    |   55–59 GB/s   |
+| 512 B  |  1.77 GB/s   |   1.24 GB/s     |   476 MB/s    |   57–61 GB/s   |
+| 4 KB   |  1.79 GB/s   |   1.84 GB/s     |  1.57 GB/s    |   59–62 GB/s   |
+| 64 KB  |  1.72 GB/s   |   1.96 GB/s     |  2.36 GB/s    |   56–59 GB/s   |
+| 1 MB   |  1.74 GB/s   |   2.00 GB/s     |  2.46 GB/s    |   57–61 GB/s   |
+| 10 MB  |  8.04 GB/s   |   8.35 GB/s     |  2.46 GB/s    |   53–58 GB/s   |
+| 100 MB | 16.52 GB/s   |  17.45 GB/s     |  1.91 GB/s    |   58–61 GB/s   |
+| 1 GB   | 17.89 GB/s   |  19.75 GB/s     |  1.87 GB/s    |   52–61 GB/s   |
+| 10 GB  |**19.76 GB/s**| **20.06 GB/s**  |  1.83 GB/s    | **55–63 GB/s** |
+
+**Key observations:**
+- **NumPy plateaus at ~2.5 GB/s** for objects ≥ 1 MB — PCG64 is single-threaded and
+  saturates at one core's DRAM write bandwidth.  For 100 MB+ objects, the working set
+  spills out of L3 cache and NumPy drops to ~1.9 GB/s.
+- **dgen-py and Rust scale to 17–20 GB/s** at 100 MB+ by filling all 12 cores with
+  Xoshiro256++ in parallel; at 10 GB they hit peak DRAM write bandwidth (~20 GB/s).
+- **NumPy is faster than dgen-py for 64 KB–1 MB objects** (2.36–2.46 GB/s vs 1.96–2.00 GB/s):
+  at those sizes the PCG64 generator fits entirely in L2/L3 cache and runs faster than
+  dgen-py's per-call pool-slice overhead.  Below 64 KB, dgen-py pulls ahead via its
+  zero-copy pool; above 1 MB, dgen-py's parallel Rayon threads dominate.
+- **Streaming (dgen-py)** hits 52–63 GB/s by reusing the Rayon thread pool across 32 MB
+  chunks; the working-set stays in L3 cache and only final writeback reaches DRAM.
+- **NumPy has no streaming API** for comparison.
 
 ### Streaming Benchmark - 100 GB Test
 
@@ -110,6 +154,123 @@ sudo yum install systemd-devel hwloc-devel
 **Note**: Without NUMA/hwloc, dgen-py still delivers high performance on UMA and single-node cloud systems. The limitation is on true multi-NUMA systems where NUMA-local memory placement and topology-aware optimization are not available.
 
 ## Quick Start
+
+### Version 0.2.3: Rolling Pool for Small-Object Workloads 🎉
+
+dgen-py v0.2.2 had a hidden inefficiency: `generate_buffer(size)` always generated **at least 1 MB** internally (the dgen-data block size floor), even when you only asked for 64 KB. That meant 15/16 of every allocation was generated and thrown away — a **16× waste**.
+
+v0.2.3 eliminates this with a **rolling buffer pool**. A single 1 MB block is generated, then served as zero-copy slices. Refills happen only on exhaustion or config change.
+
+#### Benchmark results (1 GB total output per scenario, release build):
+
+```
+── BASELINE (v0.2.2): generate_data_simple() ───────────────────────────────
+
+Strategy                     Obj size       Calls      Output  Throughput   Alloc×
+----------------------------------------------------------------------------------
+generate_data_simple            64 KB       16384        1 GB    107 MB/s     16.0x
+generate_data_simple             1 MB        1024        1 GB   1.78 GB/s      1.0x
+generate_data_simple             1 GB           1        1 GB   9.73 GB/s      1.0x
+----------------------------------------------------------------------------------
+
+── ROLLING POOL (v0.2.3): RollingPool::next_slice() ─────────────────────────
+
+Strategy                     Obj size       Calls      Output  Throughput   Alloc×
+----------------------------------------------------------------------------------
+RollingPool::next_slice         64 KB       16384        1 GB   1.73 GB/s      1.0x
+RollingPool::next_slice          1 MB        1024        1 GB   1.74 GB/s      1.0x
+RollingPool::next_slice          1 GB           1        1 GB   9.49 GB/s      0.0x
+----------------------------------------------------------------------------------
+
+── IMPROVEMENT SUMMARY ──────────────────────────────────────────────────────
+Object size             Baseline         RollingPool     Speedup
+------------------------------------------------------------------
+64 KB                   107 MB/s           1.73 GB/s      16.19x
+1 MB                   1.78 GB/s           1.74 GB/s       0.98x
+1 GB                   9.73 GB/s           9.49 GB/s       0.98x
+------------------------------------------------------------------
+```
+
+**Key design properties:**
+- 64 KB objects: **16× throughput improvement** — eliminates the 1 MB minimum-allocation waste
+- 1 MB objects: **unchanged** — exact pool block size, same generation cost as before
+- 1 GB objects: **unchanged** — large-object bypass path is unaffected
+- **Zero regression** for any object size ≥ 1 MB
+
+#### Using `generate_buffer()` (automatic, no changes needed):
+
+For object sizes < 1 MB without NUMA pinning, `generate_buffer()` **automatically uses the pool**. No code change required:
+
+```python
+import dgen_py
+
+# This call is now 16× faster for 64 KB — no API change required
+buf = dgen_py.generate_buffer(64 * 1024)
+print(len(buf))  # 65536
+print(type(buf)) # <class 'dgen_py.BytesView'> — zero-copy Python buffer
+
+# Works exactly as before for large objects
+big = dgen_py.generate_buffer(4 * 1024 * 1024)  # 4 MB — no change
+```
+
+#### Using `BufferPool` (explicit pool for tight loops):
+
+`BufferPool` gives you **explicit control** over the pool for scenarios where you pre-generate many small objects in a loop — for example, image simulation or small-object PUT benchmarks:
+
+```python
+import dgen_py
+
+# Create a pool with your desired data characteristics
+pool = dgen_py.BufferPool(
+    dedup_ratio=1.0,      # No deduplication
+    compress_ratio=1.0    # Incompressible
+)
+
+# Generate 10,000 × 64 KB image-like objects
+# Each next_slice() is a zero-copy Bytes window — no allocation cost
+images = [pool.next_slice(64 * 1024) for _ in range(10_000)]
+print(f"Generated {sum(len(img) for img in images) / 1e6:.1f} MB")  # 640.0 MB
+
+# Slices behave like bytes — pass directly to your storage client
+for img in images:
+    # e.g. s3_client.put_object(Body=img, ...)
+    pass
+```
+
+**Pool property accessors:**
+
+```python
+pool = dgen_py.BufferPool(dedup_ratio=2.0, compress_ratio=4.0)
+
+print(pool.remaining)      # bytes left before next refill (0..1_048_576)
+print(pool.dedup_ratio)    # int, current dedup factor
+print(pool.compress_ratio) # int, current compress factor
+```
+
+**Changing data characteristics mid-stream:**
+
+```python
+pool = dgen_py.BufferPool()
+
+# Generate incompressible objects
+for _ in range(1000):
+    obj = pool.next_slice(64 * 1024)
+
+# Switch to compressible — forces one pool refill, then continues zero-copy
+pool.reconfigure(dedup_ratio=1.0, compress_ratio=4.0)
+
+for _ in range(1000):
+    obj = pool.next_slice(64 * 1024)  # now compressible data
+```
+
+**When to use `BufferPool` vs `generate_buffer()`:**
+
+| Scenario | Best choice |
+|----------|-------------|
+| Existing code, small objects < 1 MB | `generate_buffer()` — automatic, no code change |
+| New code, tight loop, many small objects | `BufferPool` — explicit pool, identical performance |
+| Large objects ≥ 1 MB | Either — both use the same large-object bypass path |
+| NUMA-pinned workloads | `generate_buffer(..., numa_node=N)` — pool is bypassed per design |
 
 ### Version 0.2.0: Ultra-Fast Bulk Buffer Allocation 🎉
 

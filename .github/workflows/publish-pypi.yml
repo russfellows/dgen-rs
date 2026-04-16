@@ -26,7 +26,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features python-bindings
+          args: --release --out dist -i python${{ matrix.python-version }} --features python-bindings
           sccache: 'true'
           manylinux: '2_28'
       

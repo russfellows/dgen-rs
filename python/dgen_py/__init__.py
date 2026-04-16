@@ -20,10 +20,12 @@ except Exception:
 try:
     from ._dgen_rs import (
         BytesView,
+        BufferPool,
         generate_buffer,
         generate_into_buffer,
         Generator,
         create_bytearrays,
+        bench_rolling_pool,
     )
     
     # Try to import NUMA info (may not be available on all platforms)
@@ -43,12 +45,14 @@ except ImportError as e:
 
 __all__ = [
     "BytesView",
+    "BufferPool",
     "generate_buffer",
     "generate_data",
     "generate_into_buffer",
     "fill_buffer",
     "Generator",
     "create_bytearrays",
+    "bench_rolling_pool",
     "get_numa_info",
     "get_system_info",
 ]

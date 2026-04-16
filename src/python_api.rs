@@ -8,36 +8,79 @@ use pyo3::buffer::PyBuffer;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use std::cell::RefCell;
 
+use crate::constants::BLOCK_SIZE;
 use crate::generator::{generate_data, DataBuffer, DataGenerator, GeneratorConfig, NumaMode};
+use crate::rolling_pool::RollingPool;
 
 #[cfg(feature = "numa")]
 use crate::numa::NumaTopology;
 
 // =============================================================================
+// Thread-local rolling pool for generate_buffer() small-object fast path
+// =============================================================================
+
+thread_local! {
+    /// Per-thread pool used by generate_buffer() when size < BLOCK_SIZE.
+    /// Each Python OS thread gets its own pool — no locking required.
+    static PY_POOL: RefCell<Option<RollingPool>> = const { RefCell::new(None) };
+}
+
+// =============================================================================
 // Zero-Copy Buffer Support
 // =============================================================================
 
-/// A Python-visible wrapper around DataBuffer (UMA or NUMA) that exposes buffer protocol.
-/// This allows Python code to get a memoryview without copying data.
+/// Internal storage for a PyBytesView — either a full owned DataBuffer
+/// (large objects or NUMA allocation) or an Arc-sliced Bytes window from
+/// the rolling pool (small objects < BLOCK_SIZE).
+pub(crate) enum PyBytesViewInner {
+    /// Caller owns the full DataBuffer (Vec<u8> or NUMA Bytes).
+    Owned(DataBuffer),
+    /// Zero-copy Arc slice from the rolling pool.
+    Slice(bytes::Bytes),
+}
+
+impl PyBytesViewInner {
+    fn len(&self) -> usize {
+        match self {
+            PyBytesViewInner::Owned(buf) => buf.len(),
+            PyBytesViewInner::Slice(b) => b.len(),
+        }
+    }
+    fn as_ptr(&self) -> *const u8 {
+        match self {
+            PyBytesViewInner::Owned(buf) => buf.as_ptr(),
+            PyBytesViewInner::Slice(b) => b.as_ptr(),
+        }
+    }
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            PyBytesViewInner::Owned(buf) => buf.as_slice(),
+            PyBytesViewInner::Slice(b) => b.as_ref(),
+        }
+    }
+}
+
+/// A Python-visible wrapper around DataBuffer (UMA or NUMA) or a rolling-pool
+/// slice that exposes the buffer protocol.
 ///
-/// ZERO-COPY: Python accesses the NUMA-allocated memory directly via raw pointer!
+/// ZERO-COPY: Python accesses the underlying memory directly via raw pointer!
 #[pyclass(name = "BytesView")]
 pub struct PyBytesView {
-    /// The underlying DataBuffer (Vec for UMA, hwlocality Bytes for NUMA)
-    buffer: DataBuffer,
+    inner: PyBytesViewInner,
 }
 
 #[pymethods]
 impl PyBytesView {
     /// Get the length of the data
     fn __len__(&self) -> usize {
-        self.buffer.len()
+        self.inner.len()
     }
 
     /// Support bytes() conversion - returns a copy
     fn __bytes__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.buffer.as_slice())
+        PyBytes::new(py, self.inner.as_slice())
     }
 
     /// Implement Python buffer protocol for zero-copy access.
@@ -58,9 +101,8 @@ impl PyBytesView {
             ));
         }
 
-        let buffer = &slf.buffer;
-        let len = buffer.len();
-        let ptr = buffer.as_ptr();
+        let len = slf.inner.len();
+        let ptr = slf.inner.as_ptr();
 
         // Fill in the Py_buffer struct with DataBuffer's raw pointer
         unsafe {
@@ -197,25 +239,48 @@ fn generate_buffer(
         }
     };
 
-    // Build config
+    // ── Small-object fast path: rolling pool ─────────────────────────────────
+    // For objects < BLOCK_SIZE (1 MB) without NUMA pinning, use the thread-local
+    // rolling pool.  generate_data() enforces a BLOCK_SIZE minimum internally,
+    // so without the pool each 64 KB call generates 1 MB and wastes 15/16 of it.
+    // Config is not built on this path to avoid an unused-variable warning.
+    if size < BLOCK_SIZE && numa_node.is_none() {
+        let slice = PY_POOL.with(|cell| {
+            let mut opt = cell.borrow_mut();
+            let pool = opt.get_or_insert_with(|| RollingPool::new(dedup, compress));
+            pool.reconfigure(dedup, compress);
+            pool.next_slice(size)
+        });
+        return Py::new(
+            py,
+            PyBytesView {
+                inner: PyBytesViewInner::Slice(slice),
+            },
+        );
+    }
+
+    // ── Standard path: full DataBuffer (large objects or NUMA pinned) ────────
     let config = GeneratorConfig {
         size,
         dedup_factor: dedup,
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
-        numa_node, // CRITICAL: Use the parameter to bind to specific NUMA node
+        numa_node,
         block_size: None,
         seed: None,
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
-    // Returns DataBuffer (either UMA Vec<u8> or NUMA hwlocality Bytes)
     let data = py.detach(|| generate_data(config));
 
-    // Return PyBytesView with DataBuffer directly - ZERO COPY!
-    // Python accesses the memory via memoryview() using raw pointer from DataBuffer
-    Py::new(py, PyBytesView { buffer: data })
+    // Return PyBytesView with DataBuffer — ZERO COPY via raw pointer / buffer protocol
+    Py::new(
+        py,
+        PyBytesView {
+            inner: PyBytesViewInner::Owned(data),
+        },
+    )
 }
 
 /// Generate data using Python buffer protocol (for writing into existing buffer)
@@ -538,7 +603,12 @@ impl PyGenerator {
             chunk.truncate(written);
             // Wrap in DataBuffer::Uma for zero-copy Python access
             let buffer = DataBuffer::Uma(chunk);
-            Ok(Some(Py::new(py, PyBytesView { buffer })?))
+            Ok(Some(Py::new(
+                py,
+                PyBytesView {
+                    inner: PyBytesViewInner::Owned(buffer),
+                },
+            )?))
         }
     }
 
@@ -714,8 +784,161 @@ fn create_bytearrays(py: Python<'_>, count: usize, size: usize) -> PyResult<Py<P
 }
 
 // =============================================================================
+// BufferPool — explicit rolling pool for Python hot loops
+// =============================================================================
+
+/// High-frequency small-object buffer pool with a rolling pointer.
+///
+/// For workloads that generate millions of small objects (for example simulated
+/// PNG/JPEG images all below 1 MB), creating a `BufferPool` and calling
+/// `next_slice()` is significantly faster than calling `generate_buffer()` in a
+/// loop, because the 1 MB backing buffer is generated once and reused via
+/// zero-copy Arc slices.
+///
+/// `generate_buffer()` already uses this pool automatically for `size < 1 MB`,
+/// so for simple scripts `BufferPool` is optional.  Use it explicitly when you
+/// want to control lifecycle, share a pool across helper functions, or mix
+/// multiple dedup/compress configurations efficiently.
+///
+/// # Example
+/// ```python
+/// import dgen_py
+///
+/// pool = dgen_py.BufferPool(dedup_ratio=1, compress_ratio=1)
+///
+/// # Generate 10,000 simulated 64 KB images — each call is a zero-copy slice
+/// images = [pool.next_slice(64 * 1024) for _ in range(10_000)]
+/// print(f"Generated {sum(len(img) for img in images) / 1e6:.1f} MB")
+/// ```
+#[pyclass(name = "BufferPool")]
+pub struct PyBufferPool {
+    pool: RollingPool,
+}
+
+#[pymethods]
+impl PyBufferPool {
+    /// Create a new BufferPool.
+    ///
+    /// # Arguments
+    /// * `dedup_ratio`    — Deduplication factor (1 = no dedup, N = N:1 ratio).
+    /// * `compress_ratio` — Compression factor   (1 = incompressible, N = N:1 ratio).
+    #[new]
+    #[pyo3(signature = (dedup_ratio=1.0, compress_ratio=1.0))]
+    fn new(dedup_ratio: f64, compress_ratio: f64) -> Self {
+        let dedup = (dedup_ratio.max(1.0) as usize).max(1);
+        let compress = (compress_ratio.max(1.0) as usize).max(1);
+        Self {
+            pool: RollingPool::new(dedup, compress),
+        }
+    }
+
+    /// Return a zero-copy `BytesView` of exactly `size` bytes.
+    ///
+    /// For `size <= 1 MB`: serves from the internal rolling buffer (fast path).
+    /// For `size > 1 MB`:  generates a fresh buffer (large-object path).
+    ///
+    /// The returned `BytesView` is independent of the pool — it holds its own
+    /// Arc reference and remains valid even after the pool is refilled.
+    fn next_slice(&mut self, py: Python<'_>, size: usize) -> PyResult<Py<PyBytesView>> {
+        if size == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "size must be > 0",
+            ));
+        }
+        let slice = self.pool.next_slice(size);
+        Py::new(
+            py,
+            PyBytesView {
+                inner: PyBytesViewInner::Slice(slice),
+            },
+        )
+    }
+
+    /// Change dedup/compress parameters.
+    ///
+    /// If either value changes, the current 1 MB buffer is discarded and a new
+    /// one is generated.  Existing `BytesView` slices already handed out remain
+    /// valid.
+    #[pyo3(signature = (dedup_ratio=1.0, compress_ratio=1.0))]
+    fn reconfigure(&mut self, dedup_ratio: f64, compress_ratio: f64) {
+        self.pool.reconfigure(
+            (dedup_ratio as usize).max(1),
+            (compress_ratio as usize).max(1),
+        );
+    }
+
+    /// Bytes remaining in the current pool block before the next refill.
+    #[getter]
+    fn remaining(&self) -> usize {
+        self.pool.remaining()
+    }
+
+    /// Current deduplication factor.
+    #[getter]
+    fn dedup_ratio(&self) -> usize {
+        self.pool.dedup()
+    }
+
+    /// Current compression factor.
+    #[getter]
+    fn compress_ratio(&self) -> usize {
+        self.pool.compress()
+    }
+}
+
+// =============================================================================
 // Module Registration
 // =============================================================================
+
+/// Benchmark `RollingPool::next_slice` in-process and return raw timing data.
+///
+/// This is a pure-Rust timing function callable from Python so that "Rust native"
+/// throughput is measured in the *same process* with the *same Rayon thread pool
+/// lifecycle* as `BufferPool.next_slice()`.  That makes the comparison fair:
+/// no subprocess startup, no cold OS heap, no separate Rayon pool initialization.
+///
+/// # Arguments
+/// * `obj_size`    — Size of each object in bytes (>0).
+/// * `total_bytes` — Total bytes to generate.  Call count = max(total / obj_size, 1).
+///
+/// # Returns
+/// `(bytes_generated: int, elapsed_secs: float)` — Python can compute GB/s from these.
+///
+/// The call includes one warmup invocation (excluded from the returned elapsed time).
+///
+/// # Example
+/// ```python
+/// generated, secs = dgen_py.bench_rolling_pool(64 * 1024, 1024**3)
+/// gb_s = generated / secs / 1e9
+/// print(f"Rust native 64 KB: {gb_s:.2f} GB/s")
+/// ```
+#[pyfunction]
+fn bench_rolling_pool(obj_size: usize, total_bytes: usize) -> PyResult<(usize, f64)> {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    if obj_size == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "obj_size must be > 0",
+        ));
+    }
+
+    let calls = (total_bytes / obj_size).max(1);
+    let mut pool = RollingPool::new(1, 1);
+
+    // Warmup: one call, result discarded
+    black_box(pool.next_slice(obj_size));
+
+    let start = Instant::now();
+    let mut generated: usize = 0;
+    for _ in 0..calls {
+        let buf = pool.next_slice(obj_size);
+        generated += black_box(buf.len());
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+
+    Ok((generated, elapsed))
+}
 
 pub fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Zero-copy buffer type
@@ -724,6 +947,12 @@ pub fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Simple API
     m.add_function(wrap_pyfunction!(generate_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(generate_into_buffer, m)?)?;
+
+    // Rolling pool explicit API
+    m.add_class::<PyBufferPool>()?;
+
+    // In-process Rust-native benchmark (for comparing with BufferPool overhead)
+    m.add_function(wrap_pyfunction!(bench_rolling_pool, m)?)?;
 
     // Streaming API
     m.add_class::<PyGenerator>()?;

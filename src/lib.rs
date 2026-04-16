@@ -14,6 +14,7 @@
 // Core modules
 pub mod constants;
 pub mod generator;
+pub mod rolling_pool;
 
 #[cfg(feature = "numa")]
 pub mod numa;
@@ -26,6 +27,9 @@ mod python_api;
 pub use generator::{
     generate_data, generate_data_simple, DataGenerator, GeneratorConfig, NumaMode,
 };
+
+// Re-export rolling pool (additive; does not change any existing API)
+pub use rolling_pool::RollingPool;
 
 #[cfg(feature = "numa")]
 pub use numa::{NumaNode, NumaTopology};

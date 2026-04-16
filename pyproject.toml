@@ -1,11 +1,10 @@
 [project]
 name = "dgen-py"
-version = "0.2.2"
+version = "0.2.3"
 description = "The world's fastest Python random data generation - with NUMA optimization and zero-copy interface"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.21.0",
     "zstandard>=0.25.0",
 ]
 license = { text = "MIT OR Apache-2.0" }
@@ -24,11 +23,12 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-numpy = ["numpy>=2.0.0"]
+numpy = ["numpy>=1.21.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-benchmark>=4.0.0",
     "maturin>=1.0.0",
+    "numpy>=1.21.0",
 ]
 
 [build-system]

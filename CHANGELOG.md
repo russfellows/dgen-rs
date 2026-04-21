@@ -2,6 +2,60 @@
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+#### `thread_local` module — Canonical thread-local pool API for async servers
+
+New public module `dgen_data::thread_local` that canonicalises the `thread_local! { RefCell<RollingPool> }` pattern required by every async HTTP server that needs fake GET data.
+
+Before (boilerplate in every project):
+```rust
+use std::cell::RefCell;
+use dgen_data::RollingPool;
+thread_local! {
+    static POOL: RefCell<RollingPool> = RefCell::new(RollingPool::new(1, 1));
+}
+fn get_bytes(size: usize) -> bytes::Bytes {
+    POOL.with(|p| p.borrow_mut().next_slice(size))
+}
+```
+
+After (no boilerplate):
+```rust
+use dgen_data::thread_local::next_slice;
+fn get_bytes(size: usize) -> bytes::Bytes { next_slice(size) }
+```
+
+Public functions:
+- `next_slice(size) -> Bytes` — zero-copy for `size ≤ BLOCK_SIZE`, fresh Rayon generation for larger
+- `reconfigure(dedup, compress)` — change data characteristics; no-op if unchanged
+- `remaining() -> usize` — bytes left in current buffer before next refill (diagnostics)
+
+**Send-safety**: The `RefCell` borrow is acquired and released within a single synchronous expression before any `.await` point, so futures that call `next_slice` are `Send` and work correctly on Tokio's multi-thread runtime.
+
+**Continuity guarantee**: The rolling pointer advances continuously across all requests on a thread. Consecutive GETs naturally receive distinct byte ranges without any re-seeding.
+
+#### `BLOCK_SIZE` re-exported at crate root
+
+`dgen_data::BLOCK_SIZE` is now re-exported directly at the crate root for convenience.
+Previously it was only accessible as `dgen_data::constants::BLOCK_SIZE`.
+
+```rust
+use dgen_data::BLOCK_SIZE;  // now works
+```
+
+This allows callers to write compile-time assertions and chunk-size comparisons without
+importing the constants module:
+
+```rust
+const CHUNK: usize = 256 * 1024;
+const _: () = assert!(CHUNK <= dgen_data::BLOCK_SIZE);
+```
+
+---
+
 ## [0.2.3] - 2026-04-15
 
 ### Added

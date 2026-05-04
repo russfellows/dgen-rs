@@ -2,7 +2,7 @@
 
 **The worlds fastest Python random data generation - with NUMA optimization and zero-copy interface**
 
-[![Version](https://img.shields.io/badge/version-0.2.3-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.2.4-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
@@ -14,6 +14,7 @@
 - ⚡ **Ultra-Fast Allocation**: `create_bytearrays()` for 1,280x faster pre-allocation than Python (v0.2.0)
 - 🔁 **Zero-Copy Rolling Pool**: `generate_buffer()` auto-uses a rolling pool for small objects — 16× speedup for 64 KB objects with no API change (NEW in v0.2.3)
 - 🏊 **Explicit Pool API**: `BufferPool` class for tight loops — pre-generate once, serve millions of slices (NEW in v0.2.3)
+- ⚡ **XorStream** (`v0.2.4`): `XorStream` class for dedup-safe generation without Rayon — ~15 GB/s/core, lock-free, zero per-call allocation on the `fill()` path; ideal for high-concurrency PUT benchmarks (NEW in v0.2.4)
 - 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
 - 🔄 **Reproducible Data**: Seed parameter for identical data generation (v0.1.6) with dynamic reseeding (v0.1.7)
 - 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
@@ -154,6 +155,150 @@ sudo yum install systemd-devel hwloc-devel
 **Note**: Without NUMA/hwloc, dgen-py still delivers high performance on UMA and single-node cloud systems. The limitation is on true multi-NUMA systems where NUMA-local memory placement and topology-aware optimization are not available.
 
 ## Quick Start
+
+### Version 0.2.4: XorStream — High-Concurrency Dedup-Safe Generation 🎉
+
+`XorStream` is a lock-free data generator optimised for **high-concurrency storage benchmarks**
+(≥ 32 concurrent PUT threads).  It produces guaranteed-unique, dedup-safe data at ~15 GB/s per
+core with **zero per-call allocation** on the `fill()` path.
+
+#### Design
+
+A 1 MiB base buffer is filled once with Xoshiro256++ output at construction time.  Each `fill()`
+call atomically increments a counter to obtain a unique `object_id`, derives a Xoshiro256++ seed
+via splitmix64 (one high-avalanche pass that converts sequential IDs into uncorrelated seeds), then
+XORs the resulting keystream against the cyclic 1 MiB base into the output buffer.  No Rayon, no
+mutex — just one `AtomicU64::fetch_add`.
+
+#### When to choose XorStream
+
+| Scenario | Best choice |
+|---|---|
+| High concurrency ≥ 32 PUT workers | **`XorStream`** — no Rayon overhead |
+| Medium objects 1–32 MiB | **`XorStream`** — fill() has no per-call alloc |
+| Small objects < 1 MiB | `BufferPool` / `generate_buffer()` |
+| Very large objects or streaming | `Generator.fill_chunk()` |
+| Dedup-safe requirement (required) | **`XorStream`** or `generate_buffer(dedup_ratio=1)` |
+| Compressible data needed | `Generator` / `generate_buffer(compress_ratio=N)` |
+
+#### Python usage (uv / pip)
+
+```python
+import dgen_py
+import time
+
+stream = dgen_py.XorStream()
+
+# --- Fastest path: fill a pre-allocated bytearray in-place ---
+# No heap allocation on the hot path; only the output buffer is written.
+obj_size = 8 * 1024 * 1024      # 8 MiB
+buf = bytearray(obj_size)
+
+N = 1000
+t0 = time.perf_counter()
+for _ in range(N):
+    stream.fill(buf)
+    # send buf to your storage client here
+elapsed = time.perf_counter() - t0
+print(f"fill()  {N}× 8 MiB → {N * obj_size / elapsed / 1e9:.2f} GB/s")
+# example output: fill() 1000× 8 MiB → 14.7 GB/s
+
+# --- Convenience path: allocate + fill in one call ---
+# Returns a BytesView (zero-copy via Python buffer protocol).
+data = stream.generate(8 * 1024 * 1024)
+view = memoryview(data)             # zero-copy access to raw bytes
+raw  = bytes(data)                  # copies to a Python bytes object
+
+import numpy as np
+arr = np.frombuffer(view, dtype=np.uint8)   # zero-copy numpy array
+print(f"numpy shape: {arr.shape}")          # (8388608,)
+
+# --- Track objects generated ---
+print(f"objects_generated: {stream.objects_generated}")
+
+# --- Multiple threads sharing one stream (safe — AtomicU64 counter) ---
+import threading
+
+shared_stream = dgen_py.XorStream()
+buf_tls = [bytearray(8 * 1024 * 1024) for _ in range(4)]
+results = []
+
+def worker(tid):
+    for _ in range(250):
+        shared_stream.fill(buf_tls[tid])
+    results.append(tid)
+
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+for t in threads: t.start()
+for t in threads: t.join()
+print(f"Concurrent workers done, objects_generated: {shared_stream.objects_generated}")
+# → 1000 unique objects generated across 4 threads, guaranteed dedup-safe
+```
+
+#### Rust usage
+
+```rust
+use dgen_data::UniqueXorStream;
+
+fn main() {
+    let stream = UniqueXorStream::new();      // 1 MiB base buffer, seeded from entropy
+
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+
+    // fill() takes &self — call concurrently from any number of threads
+    stream.fill(&mut buf);   // object 0
+    stream.fill(&mut buf);   // object 1 — provably different bytes
+
+    println!("Objects generated: {}", stream.objects_generated());
+
+    // Use as a process-level singleton with OnceLock
+    use std::sync::OnceLock;
+    static XOR: OnceLock<UniqueXorStream> = OnceLock::new();
+    let xor = XOR.get_or_init(UniqueXorStream::new);
+
+    // Every call from any thread gets a unique output — lock-free
+    xor.fill(&mut buf);
+}
+```
+
+`UniqueXorStream` is also re-exported at the crate root:
+
+```rust
+use dgen_data::UniqueXorStream;  // preferred
+// or
+use dgen_data::xor_stream::UniqueXorStream;
+```
+
+#### v0.2.4 also includes: Rayon global pool fix
+
+`generate_data()` previously created a new `ThreadPoolBuilder` pool on every call.
+At c=32 concurrent callers this caused 32×28=896 concurrent OS thread create/destroy
+operations, producing a **24% throughput cliff** on 8 MiB objects.
+
+**Fix**: the non-NUMA path now calls `par_chunks_mut().enumerate().for_each()` on
+the existing global Rayon pool instead of building a new pool per call.
+
+Benchmark (8 MiB PUT, loopback, 28-core Xeon):
+
+| Concurrency | Before (v0.2.3) | After (v0.2.4) |
+|:-----------:|:---------------:|:--------------:|
+| c=16        | 1,308 MiB/s     | 1,340 MiB/s    |
+| c=32        | **1,041 MiB/s** | **1,987 MiB/s** (+91%) |
+| c=64        | **1,049 MiB/s** | **2,262 MiB/s** (+116%) |
+
+#### v0.2.4 also includes: `thread_local` module
+
+Canonical `thread_local::next_slice()` API for async HTTP servers — eliminates the
+boilerplate `thread_local! { RefCell<RollingPool> }` pattern:
+
+```rust
+use dgen_data::thread_local::next_slice;
+
+// Inside a stream::unfold closure (before any .await):
+fn get_chunk(chunk_size: usize) -> bytes::Bytes {
+    next_slice(chunk_size)   // zero-copy Arc slice, no re-seeding, no locking
+}
+```
 
 ### Version 0.2.3: Rolling Pool for Small-Object Workloads 🎉
 

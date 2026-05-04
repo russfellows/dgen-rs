@@ -1,6 +1,6 @@
 [project]
 name = "dgen-py"
-version = "0.2.3"
+version = "0.2.4"
 description = "The world's fastest Python random data generation - with NUMA optimization and zero-copy interface"
 readme = "README.md"
 requires-python = ">=3.11"

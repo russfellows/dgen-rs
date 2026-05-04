@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use crate::constants::BLOCK_SIZE;
 use crate::generator::{generate_data, DataBuffer, DataGenerator, GeneratorConfig, NumaMode};
 use crate::rolling_pool::RollingPool;
+use crate::xor_stream::UniqueXorStream;
 
 #[cfg(feature = "numa")]
 use crate::numa::NumaTopology;
@@ -887,7 +888,157 @@ impl PyBufferPool {
 }
 
 // =============================================================================
-// Module Registration
+// XorStream — fast, dedup-safe data generation without Rayon
+// =============================================================================
+
+/// Fast, dedup-safe data generator using XOR keystream.
+///
+/// A `XorStream` holds a 1 MiB random base buffer and an atomic counter.
+/// Each `fill()` or `generate()` call produces a unique output block — no
+/// two calls ever share a 512-byte fingerprint, guaranteed.
+///
+/// **Thread-safe**: every method takes `&self`, so the same instance can be
+/// shared across Python threads without a mutex.
+///
+/// **When to prefer `XorStream` over `Generator`**:
+/// - High concurrency (≥ 32 concurrent callers): no Rayon thread scheduling overhead
+/// - Medium objects (1–32 MiB): single-core throughput ~15 GB/s
+/// - Dedup-safe requirement: each call produces provably unique data
+///
+/// # Rust example
+///
+/// ```rust
+/// use dgen_data::UniqueXorStream;
+///
+/// let stream = UniqueXorStream::new();
+/// let mut buf = vec![0u8; 8 * 1024 * 1024];
+/// stream.fill(&mut buf);   // object 0 — unique 8 MiB payload
+/// stream.fill(&mut buf);   // object 1 — completely different bytes
+/// ```
+///
+/// # Python example
+///
+/// ```python
+/// import dgen_py
+///
+/// stream = dgen_py.XorStream()
+///
+/// # Fill a pre-allocated bytearray in-place (no allocation on hot path)
+/// buf = bytearray(8 * 1024 * 1024)
+/// stream.fill(buf)          # object 0
+/// stream.fill(buf)          # object 1 — different bytes
+///
+/// # Or allocate a new BytesView in one call
+/// data = stream.generate(8 * 1024 * 1024)
+/// view = memoryview(data)   # zero-copy access
+/// ```
+#[pyclass(name = "XorStream")]
+pub struct PyXorStream {
+    inner: UniqueXorStream,
+}
+
+#[pymethods]
+impl PyXorStream {
+    /// Create a new `XorStream`.
+    ///
+    /// Seeds the 1 MiB base buffer from system entropy (wall clock + `getrandom`).
+    /// Every call to `XorStream()` produces a distinct instance with its own
+    /// unique base.
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: UniqueXorStream::new(),
+        }
+    }
+
+    /// Fill a pre-allocated buffer with unique, dedup-safe data.
+    ///
+    /// This is the fastest path for storage benchmarks: allocate once with
+    /// `bytearray(size)`, then call `fill()` in a tight loop — no per-call
+    /// heap allocation.
+    ///
+    /// # Arguments
+    /// * `buffer` — Any writable Python buffer: `bytearray`, `memoryview`, numpy array, etc.
+    ///
+    /// # Example
+    /// ```python
+    /// stream = dgen_py.XorStream()
+    /// buf = bytearray(8 * 1024 * 1024)
+    ///
+    /// for i in range(1000):
+    ///     stream.fill(buf)
+    ///     # send buf to your storage client here
+    /// ```
+    fn fill(&self, py: Python<'_>, buffer: &Bound<'_, PyAny>) -> PyResult<()> {
+        let buf: PyBuffer<u8> = PyBuffer::get(buffer)?;
+        if buf.readonly() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "XorStream.fill() requires a writable buffer (bytearray, numpy array, etc.)",
+            ));
+        }
+        if !buf.is_c_contiguous() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Buffer must be C-contiguous",
+            ));
+        }
+        let size = buf.len_bytes();
+        // Release GIL while generating — allows other Python threads to proceed
+        py.detach(|| unsafe {
+            let dst_ptr = buf.buf_ptr() as *mut u8;
+            let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
+            self.inner.fill(dst_slice);
+        });
+        Ok(())
+    }
+
+    /// Allocate a new `BytesView` of `size` bytes, filled with unique data.
+    ///
+    /// Convenient when you do not want to manage a pre-allocated buffer.
+    /// For tight loops, prefer `fill()` with a reused `bytearray` to avoid
+    /// the per-call heap allocation.
+    ///
+    /// Returns a `BytesView` that supports the Python buffer protocol:
+    /// - `memoryview(data)` — zero-copy view
+    /// - `bytes(data)` — copies to a `bytes` object
+    /// - `numpy.frombuffer(memoryview(data))` — zero-copy numpy array
+    ///
+    /// # Example
+    /// ```python
+    /// stream = dgen_py.XorStream()
+    ///
+    /// data = stream.generate(8 * 1024 * 1024)
+    /// view = memoryview(data)        # zero-copy access to raw bytes
+    /// raw  = bytes(data)             # copies to Python bytes object
+    ///
+    /// import numpy as np
+    /// arr = np.frombuffer(view, dtype=np.uint8)  # zero-copy numpy view
+    /// ```
+    fn generate(&self, py: Python<'_>, size: usize) -> PyResult<Py<PyBytesView>> {
+        let mut buf = vec![0u8; size];
+        // Release GIL while filling — allows other Python threads to run
+        py.detach(|| {
+            self.inner.fill(&mut buf);
+        });
+        Py::new(
+            py,
+            PyBytesView {
+                inner: PyBytesViewInner::Owned(DataBuffer::Uma(buf)),
+            },
+        )
+    }
+
+    /// Number of objects generated by this instance (fill + generate calls combined).
+    ///
+    /// Each call to `fill()` or `generate()` increments this counter by one.
+    /// Useful for diagnostics and progress tracking.
+    #[getter]
+    fn objects_generated(&self) -> u64 {
+        self.inner.objects_generated()
+    }
+}
+
+// =============================================================================
+// Benchmark helper
 // =============================================================================
 
 /// Benchmark `RollingPool::next_slice` in-process and return raw timing data.
@@ -950,6 +1101,9 @@ pub fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Rolling pool explicit API
     m.add_class::<PyBufferPool>()?;
+
+    // XOR stream: fast dedup-safe generation without Rayon
+    m.add_class::<PyXorStream>()?;
 
     // In-process Rust-native benchmark (for comparing with BufferPool overhead)
     m.add_function(wrap_pyfunction!(bench_rolling_pool, m)?)?;

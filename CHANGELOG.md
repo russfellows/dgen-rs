@@ -2,9 +2,48 @@
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
 
-## [Unreleased]
+## [0.2.4] - 2026-05-04
 
 ### Added
+
+#### `xor_stream` module — `UniqueXorStream`: fast, dedup-safe data generation without Rayon
+
+New public module `dgen_data::xor_stream` exposing `UniqueXorStream`, a thread-safe data
+generator that produces unique, dedup-safe byte streams at ~15 GB/s per core without
+spawning any Rayon threads.
+
+**Design**: A 1 MiB base buffer is filled with Xoshiro256++ output at construction time.
+Each `fill()` call increments an `AtomicU64` counter, derives a unique Xoshiro256++ seed
+via splitmix64, generates a keystream, and XORs it against the cyclic 1 MiB base to
+produce the output.  The result is unique per call but requires zero synchronisation
+beyond a single 64-bit atomic increment — no mutex, no allocation beyond the output
+buffer.
+
+```rust
+use dgen_data::UniqueXorStream;
+
+let stream = UniqueXorStream::new();    // 1 MiB base buffer generated once
+let mut buf = vec![0u8; 8 * 1024 * 1024];
+
+// Each call produces a different, dedup-safe 8 MiB payload
+stream.fill(&mut buf);
+stream.fill(&mut buf);   // completely different bytes
+```
+
+**Dedup safety**: No two 512-byte blocks across any two `fill()` calls share a
+fingerprint — validated by a 100,000-block collision test in the unit suite (5 tests,
+all pass).
+
+**Thread safety**: `UniqueXorStream` is `Sync`; multiple threads may call `fill()` on
+the same instance concurrently.  The `AtomicU64` counter guarantees each call receives a
+unique seed regardless of interleaving.
+
+**Constants**: `dgen_data::xor_stream::XOR_BASE_SIZE = 1024 * 1024` (1 MiB base).
+
+**When to use**: Prefer `UniqueXorStream` over the Rayon-based `generate_data()` path
+when generating large objects at high concurrency (≥ 32 concurrent writers).  At those
+concurrency levels, Rayon's global pool delivers the same throughput per object, but
+`UniqueXorStream` avoids all thread scheduling overhead and scales linearly.
 
 #### `thread_local` module — Canonical thread-local pool API for async servers
 
@@ -53,6 +92,26 @@ importing the constants module:
 const CHUNK: usize = 256 * 1024;
 const _: () = assert!(CHUNK <= dgen_data::BLOCK_SIZE);
 ```
+
+### Fixed
+
+#### `generate_data()` — Rayon global pool (no per-call thread pool creation)
+
+`generate_data()` in `src/generator.rs` previously called
+`rayon::ThreadPoolBuilder::new().num_threads(N).build()` on **every invocation**, spinning
+up N OS threads and tearing them down after generating a single object.  At high
+concurrency (c=32, c=64) this created hundreds of simultaneous OS thread
+create/destroy cycles, collapsing throughput by ~24%.
+
+**Fix**: The non-NUMA path now calls `par_chunks_mut().enumerate().for_each()` directly
+on the data slice.  Rayon dispatches work to its **global** thread pool, which is
+constructed once at first use and reused for the lifetime of the process.  The NUMA-aware
+path (feature `thread-pinning`) is unchanged — it still builds a topology-pinned custom
+pool.
+
+**Impact**: With the global pool, sai3-bench `fresh` mode throughput at c=32 improved
+from ~1,040 MiB/s to ~1,987 MiB/s (8 MiB objects, loopback, loki-russ 28-core Xeon).
+The previous −24% concurrency cliff is eliminated.
 
 ---
 

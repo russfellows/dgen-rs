@@ -578,11 +578,13 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
             .expect("Failed to create thread pool")
     };
 
-    #[cfg(not(all(feature = "numa", feature = "thread-pinning")))]
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .expect("Failed to create thread pool");
+    // Non-NUMA path: use the global Rayon pool directly (no per-call pool creation).
+    // The global pool is initialised once by Rayon on first use and reused for the
+    // lifetime of the process.  Rayon's work-stealing scheduler only spawns as many
+    // parallel tasks as there are chunks, so on a 256-core machine generating an
+    // 8 MiB object (2 × 4 MiB blocks) only 2 cores are used — no waste.
+    #[cfg(not(feature = "numa"))]
+    let _ = num_threads; // consumed by NUMA path only
 
     // First-touch memory initialization for NUMA locality
     // Only beneficial on true NUMA systems (>1 node)
@@ -612,6 +614,8 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
         }
     }
 
+    // NUMA path: use the custom thread-pinned pool built above.
+    #[cfg(all(feature = "numa", feature = "thread-pinning"))]
     pool.install(|| {
         let data = data_buffer.as_mut_slice();
         data.par_chunks_mut(block_size)
@@ -619,7 +623,6 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
             .for_each(|(i, chunk)| {
                 let ub = i % unique_blocks;
                 tracing::trace!("Filling block {} (unique block {})", i, ub);
-                // Use sequential block index for reproducibility
                 fill_block(
                     chunk,
                     ub,
@@ -629,6 +632,24 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
                 );
             });
     });
+
+    // Non-NUMA path: use the global Rayon pool (no per-call allocation).
+    #[cfg(not(all(feature = "numa", feature = "thread-pinning")))]
+    data_buffer
+        .as_mut_slice()
+        .par_chunks_mut(block_size)
+        .enumerate()
+        .for_each(|(i, chunk)| {
+            let ub = i % unique_blocks;
+            tracing::trace!("Filling block {} (unique block {})", i, ub);
+            fill_block(
+                chunk,
+                ub,
+                copy_lens[ub].min(chunk.len()),
+                i as u64,
+                call_entropy,
+            );
+        });
 
     tracing::debug!("Parallel generation complete, truncating to {} bytes", size);
     // Truncate to requested size (metadata only, NO COPY!)

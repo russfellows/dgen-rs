@@ -39,6 +39,21 @@
 //!   so futures that call [`next_slice`] are `Send` and can be spawned on a
 //!   Tokio multi-thread runtime without any unsafe code.
 //!
+//! # TODO — verify s3-ultra wires this up before tagging v0.2.4
+//!
+//! **Before committing and pushing this module**, confirm the status in s3-ultra:
+//!
+//! - `s3-ultra/src/s3_backend.rs` module doc describes `thread_local::next_slice` as the
+//!   canonical GET body generation API, but the **actual implementation** (as of v0.1.6)
+//!   still uses a static 32 MiB `OnceLock<Bytes>` pool (introduced in v0.1.5 for the 62×
+//!   throughput fix).  The `thread_local` approach was the intended design but was never
+//!   wired up.
+//! - Decide whether to: (a) update s3-ultra to actually call `next_slice` and benchmark
+//!   the result, or (b) leave the static pool as-is and simply publish this module as a
+//!   library convenience for future callers.
+//! - See also: `s3-ultra/docs/Architecture-Guide.md` "GET body generation" section and
+//!   the TODO block in `s3-ultra/src/s3_backend.rs`.
+//!
 //! # Usage in an async HTTP server
 //!
 //! ```rust

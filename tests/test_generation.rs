@@ -13,7 +13,7 @@
 //   - Zero-size generation (completes immediately, no infinite loop)
 //   - Unique data by default (no seed → different bytes each run)
 
-use dgen_data::{DataGenerator, GeneratorConfig, NumaMode, generate_data_simple};
+use dgen_data::{generate_data_simple, DataGenerator, GeneratorConfig, NumaMode};
 use std::collections::HashSet;
 
 const BLOCK: usize = 1024 * 1024; // 1 MiB — matches BLOCK_SIZE in dgen-data
@@ -126,7 +126,10 @@ fn test_zero_size_batch() {
 #[test]
 fn test_zero_size_streaming() {
     let mut gen = new_gen(0, 1, 1);
-    assert!(gen.is_complete(), "zero-size generator should start complete");
+    assert!(
+        gen.is_complete(),
+        "zero-size generator should start complete"
+    );
     let mut buf = vec![0u8; 1024];
     let n = gen.fill_chunk(&mut buf);
     assert_eq!(n, 0, "fill_chunk on zero-size must return 0");
@@ -410,7 +413,7 @@ fn test_default_entropy_unique() {
 #[test]
 fn test_set_seed_stripe_reproducibility() {
     let chunk = BLOCK * 10; // 10 MiB per stripe
-    let total = chunk * 4;  // room for 4 stripes
+    let total = chunk * 4; // room for 4 stripes
     let seed_a = 0x1111_1111u64;
     let seed_b = 0x2222_2222u64;
 
@@ -446,8 +449,14 @@ fn test_set_seed_stripe_reproducibility() {
     gen.fill_chunk(&mut buf);
     let stripe_b2 = buf.clone();
 
-    assert_eq!(stripe_a1, stripe_a2, "Stripe A must be reproducible after set_seed");
-    assert_eq!(stripe_b1, stripe_b2, "Stripe B must be reproducible after set_seed");
+    assert_eq!(
+        stripe_a1, stripe_a2,
+        "Stripe A must be reproducible after set_seed"
+    );
+    assert_eq!(
+        stripe_b1, stripe_b2,
+        "Stripe B must be reproducible after set_seed"
+    );
     assert_ne!(stripe_a1, stripe_b1, "Stripe A and B must differ");
 }
 
@@ -510,7 +519,11 @@ fn test_concurrent_generation() {
     // All must differ (different seeds)
     for i in 0..r.len() {
         for j in (i + 1)..r.len() {
-            assert_ne!(r[i], r[j], "threads {} and {} produced identical data", i, j);
+            assert_ne!(
+                r[i], r[j],
+                "threads {} and {} produced identical data",
+                i, j
+            );
         }
     }
 }
@@ -568,8 +581,12 @@ fn test_sub_block_compress2_batch() {
         assert_eq!(data.len(), size, "size mismatch for {}", size);
         // 50% expected, 10% tolerance (the random portion can absorb a few zeros,
         // and integer arithmetic in copy_len means the ratio is only approximate).
-        assert_zero_fraction(data.as_slice(), 0.50, 0.10,
-            &format!("batch compress=2 size={}", size));
+        assert_zero_fraction(
+            data.as_slice(),
+            0.50,
+            0.10,
+            &format!("batch compress=2 size={}", size),
+        );
     }
 }
 
@@ -589,8 +606,12 @@ fn test_sub_block_compress4_batch() {
             block_size: None,
         });
         assert_eq!(data.len(), size);
-        assert_zero_fraction(data.as_slice(), 0.75, 0.10,
-            &format!("batch compress=4 size={}", size));
+        assert_zero_fraction(
+            data.as_slice(),
+            0.75,
+            0.10,
+            &format!("batch compress=4 size={}", size),
+        );
     }
 }
 
@@ -627,8 +648,12 @@ fn test_sub_block_compress2_streaming() {
     for &size in &[512usize, 1024, 4096, 32 * 1024, 256 * 1024, BLOCK / 2] {
         let data = drain(new_seeded_gen(size, 1, 2, 0xDEF1), 512);
         assert_eq!(data.len(), size, "streaming size mismatch for {}", size);
-        assert_zero_fraction(&data, 0.50, 0.10,
-            &format!("streaming compress=2 size={}", size));
+        assert_zero_fraction(
+            &data,
+            0.50,
+            0.10,
+            &format!("streaming compress=2 size={}", size),
+        );
     }
 }
 
@@ -637,8 +662,12 @@ fn test_sub_block_compress4_streaming() {
     for &size in &[512usize, 1024, 4096, 32 * 1024, 256 * 1024, BLOCK / 2] {
         let data = drain(new_seeded_gen(size, 1, 4, 0xDEF2), 512);
         assert_eq!(data.len(), size);
-        assert_zero_fraction(&data, 0.75, 0.10,
-            &format!("streaming compress=4 size={}", size));
+        assert_zero_fraction(
+            &data,
+            0.75,
+            0.10,
+            &format!("streaming compress=4 size={}", size),
+        );
     }
 }
 
@@ -667,10 +696,10 @@ fn test_batch_streaming_consistency_sub_block() {
         assert_eq!(batch.len(), size, "batch size mismatch for {}", size);
         assert_eq!(stream.len(), size, "stream size mismatch for {}", size);
         assert_eq!(
-            batch.as_slice(), stream.as_slice(),
+            batch.as_slice(),
+            stream.as_slice(),
             "batch and streaming produced different bytes for size={}",
             size
         );
     }
 }
-

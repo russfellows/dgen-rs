@@ -453,7 +453,12 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
     // For sub-block objects, total_size = size (the actual object size, not a full 1 MiB block).
     // For multi-block objects, total_size = nblocks * block_size (same as before).
     let total_size = nblocks * effective_block_size;
-    tracing::debug!("Allocating {} bytes ({} blocks of {} B each)", total_size, nblocks, effective_block_size);
+    tracing::debug!(
+        "Allocating {} bytes ({} blocks of {} B each)",
+        total_size,
+        nblocks,
+        effective_block_size
+    );
 
     // CRITICAL: UMA fast path - always use Vec<u8> when numa_node is None
     // This preserves 43-50 GB/s performance on UMA systems
@@ -1352,13 +1357,16 @@ impl DataGenerator {
             let epoch_offset = block_idx.saturating_sub(self.seed_epoch_start_block);
             let ub = epoch_offset % self.unique_blocks;
 
-            let mut block_buf = vec![0u8; self.block_size.min(
-                if self.total_size > 0 && self.total_size < self.block_size {
-                    self.total_size
-                } else {
-                    self.block_size
-                },
-            )];
+            let mut block_buf = vec![
+                0u8;
+                self.block_size.min(
+                    if self.total_size > 0 && self.total_size < self.block_size {
+                        self.total_size
+                    } else {
+                        self.block_size
+                    },
+                )
+            ];
             let actual_block_size = block_buf.len();
             fill_block(
                 &mut block_buf,
@@ -1546,7 +1554,11 @@ impl DataGenerator {
         self.seed_epoch_start_block = self.current_pos / self.block_size;
         tracing::debug!(
             "set_seed: {} (entropy={:#018x}), epoch starts at block {}",
-            if seed.is_some() { "deterministic" } else { "non-deterministic" },
+            if seed.is_some() {
+                "deterministic"
+            } else {
+                "non-deterministic"
+            },
             self.call_entropy,
             self.seed_epoch_start_block,
         );
@@ -1582,7 +1594,11 @@ mod tests {
         init_tracing();
         // generate_data_simple returns exactly the requested size (no 1 MiB minimum).
         let data = generate_data_simple(100, 1, 1);
-        assert_eq!(data.len(), 100, "should return exactly the requested byte count");
+        assert_eq!(
+            data.len(),
+            100,
+            "should return exactly the requested byte count"
+        );
     }
 
     #[test]

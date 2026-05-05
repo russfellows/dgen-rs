@@ -70,7 +70,8 @@ avg_throughput = (TEST_SIZE / (1024**3)) / avg_duration
 print("-" * 60)
 print(f"AVERAGE DURATION:   {avg_duration:.4f} seconds")
 print(f"AVERAGE THROUGHPUT: {avg_throughput:.2f} GB/s")
-print(f"PER-CORE THROUGHPUT: {avg_throughput / info['physical_cores']:.2f} GB/s")
+if info:
+    print(f"PER-CORE THROUGHPUT: {avg_throughput / info['physical_cores']:.2f} GB/s")
 print()
 
 # Test 2: Override with 64 MB chunk size
@@ -117,7 +118,8 @@ avg_throughput_64 = (TEST_SIZE / (1024**3)) / avg_duration_64
 print("-" * 60)
 print(f"AVERAGE DURATION:   {avg_duration_64:.4f} seconds")
 print(f"AVERAGE THROUGHPUT: {avg_throughput_64:.2f} GB/s")
-print(f"PER-CORE THROUGHPUT: {avg_throughput_64 / info['physical_cores']:.2f} GB/s")
+if info:
+    print(f"PER-CORE THROUGHPUT: {avg_throughput_64 / info['physical_cores']:.2f} GB/s")
 print()
 
 # Comparison
@@ -136,6 +138,6 @@ print()
 print("OPTIMIZATION NOTES:")
 print("  - Thread pool created ONCE and reused")
 print("  - ZERO-COPY: Generates directly into output buffer")
-print("  - Internal parallelization: 4 MiB blocks (optimal for L3 cache)")
+print("  - Internal parallelization: 1 MiB blocks / BLOCK_SIZE (optimal for L3 cache)")
 print("  - Parallel generation distributes blocks across all available cores")
 

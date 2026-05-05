@@ -187,8 +187,9 @@ impl PyBytesView {
 ///                                  compress_ratio=1, max_threads=8)
 /// print(f"Generated {len(data)} bytes")
 /// ```
+#[allow(clippy::too_many_arguments)] // PyO3 function — Python API args cannot be easily grouped
 #[pyfunction]
-#[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
+#[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, method="parallel"))]
 fn generate_buffer(
     py: Python<'_>,
     size: usize,
@@ -197,6 +198,7 @@ fn generate_buffer(
     numa_mode: &str,
     max_threads: Option<usize>,
     numa_node: Option<usize>,
+    method: &str,
 ) -> PyResult<Py<PyBytesView>> {
     // Warn if floats are being truncated
     if dedup_ratio.fract() != 0.0 {
@@ -226,6 +228,9 @@ fn generate_buffer(
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
 
+    // Parse method — only "parallel" is supported; accept silently for backward compat
+    let _ = method; // method parameter kept for API compatibility
+
     // Parse NUMA mode
     let numa = match numa_mode.to_lowercase().as_str() {
         "auto" => NumaMode::Auto,
@@ -243,7 +248,6 @@ fn generate_buffer(
     // For objects < BLOCK_SIZE (1 MB) without NUMA pinning, use the thread-local
     // rolling pool.  generate_data() enforces a BLOCK_SIZE minimum internally,
     // so without the pool each 64 KB call generates 1 MB and wastes 15/16 of it.
-    // Config is not built on this path to avoid an unused-variable warning.
     if size < BLOCK_SIZE && numa_node.is_none() {
         let slice = PY_POOL.with(|cell| {
             let mut opt = cell.borrow_mut();
@@ -259,7 +263,7 @@ fn generate_buffer(
         );
     }
 
-    // ── Standard path: full DataBuffer (large objects or NUMA pinned) ────────
+    // ── Standard path: full DataBuffer (large objects or NUMA-pinned) ────────
     let config = GeneratorConfig {
         size,
         dedup_factor: dedup,
@@ -310,8 +314,9 @@ fn generate_buffer(
 ///                                        compress_ratio=2, max_threads=4)
 /// print(f"Wrote {nbytes} bytes")
 /// ```
+#[allow(clippy::too_many_arguments)] // PyO3 function — Python API args cannot be easily grouped
 #[pyfunction]
-#[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
+#[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, method="parallel"))]
 fn generate_into_buffer(
     py: Python<'_>,
     buffer: &Bound<'_, PyAny>,
@@ -320,6 +325,7 @@ fn generate_into_buffer(
     numa_mode: &str,
     max_threads: Option<usize>,
     numa_node: Option<usize>,
+    method: &str,
 ) -> PyResult<usize> {
     // Get buffer via PyBuffer protocol
     let buf: PyBuffer<u8> = PyBuffer::get(buffer)?;
@@ -365,6 +371,9 @@ fn generate_into_buffer(
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
 
+    // method parameter kept for API compatibility; only "parallel" is supported
+    let _ = method;
+
     // Parse NUMA mode
     let numa = match numa_mode.to_lowercase().as_str() {
         "auto" => NumaMode::Auto,
@@ -385,7 +394,7 @@ fn generate_into_buffer(
         compress_factor: compress,
         numa_mode: numa,
         max_threads,
-        numa_node, // CRITICAL: Bind to specific NUMA node if specified
+        numa_node,
         block_size: None,
         seed: None,
     };
@@ -463,7 +472,7 @@ impl PyGenerator {
     /// When seed is provided, Generator produces identical data for the same configuration.
     /// This enables reproducible testing and benchmarking.
     #[new]
-    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None, seed=None))]
+    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None, seed=None, method="parallel"))]
     #[allow(clippy::too_many_arguments)] // PyO3 API requires all parameters as function arguments
     fn new(
         py: Python<'_>,
@@ -476,6 +485,7 @@ impl PyGenerator {
         chunk_size: Option<usize>,
         block_size: Option<usize>,
         seed: Option<u64>,
+        method: &str,
     ) -> PyResult<Self> {
         // Warn if floats are being truncated
         if dedup_ratio.fract() != 0.0 {
@@ -501,6 +511,9 @@ impl PyGenerator {
 
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
+
+        // method parameter kept for API compatibility; only "parallel" is supported
+        let _ = method;
 
         // Parse NUMA mode
         let numa = match numa_mode.to_lowercase().as_str() {
@@ -887,7 +900,7 @@ impl PyBufferPool {
 }
 
 // =============================================================================
-// Module Registration
+// Benchmark helper
 // =============================================================================
 
 /// Benchmark `RollingPool::next_slice` in-process and return raw timing data.

@@ -37,29 +37,29 @@ $ RUST_LOG=debug cargo test test_generate_minimal -- --nocapture
 2026-01-08T13:50:20.756031Z DEBUG dgen_rs::generator: Generating: size=4194304, blocks=1, dedup=1, unique_blocks=1, compress=1
 2026-01-08T13:50:20.756233Z DEBUG dgen_rs::generator: Allocating 4194304 bytes (1 blocks)
 2026-01-08T13:50:20.756300Z DEBUG dgen_rs::generator: Starting parallel generation with rayon
-2026-01-08T13:50:20.813882Z DEBUG dgen_rs::generator: Parallel generation complete, truncating to 4194304 bytes
+2026-01-08T13:50:20.813882Z DEBUG dgen_rs::generator: Parallel generation complete, truncating to 1048576 bytes
 ```
 
 ## Performance Notes
 
 ### Streaming Generator Chunk Size
 
-**CRITICAL**: The `DataGenerator::fill_chunk()` method generates full 4 MiB blocks internally.
+**CRITICAL**: The `DataGenerator::fill_chunk()` method generates full 1 MiB blocks internally (`BLOCK_SIZE = 1_048_576`).
 
-- ✅ **Efficient**: Use chunk size >= 4 MiB (BLOCK_SIZE)
+- ✅ **Efficient**: Use chunk size >= 1 MiB (BLOCK_SIZE)
 - ⚠️  **Inefficient**: Small chunks (1-8 KiB) cause massive overhead
 
 Example:
 ```rust
-// GOOD: 5 iterations for 20 MiB
-let mut chunk = vec![0u8; 4 * 1024 * 1024]; // 4 MiB chunks
+// GOOD: 20 iterations for 20 MiB
+let mut chunk = vec![0u8; 1024 * 1024]; // 1 MiB = BLOCK_SIZE
 
-// BAD: 20,480 iterations for 20 MiB (4096x overhead!)
+// BAD: 20,480 iterations for 20 MiB (20480x overhead!)
 let mut chunk = vec![0u8; 1024]; // 1 KiB chunks
 ```
 
 The inefficiency occurs because:
-1. Each `fill_chunk()` call generates a full 4 MiB block
+1. Each `fill_chunk()` call generates a full 1 MiB block
 2. Only copies the requested amount (e.g., 1024 bytes)
 3. Discards the rest
 
@@ -69,8 +69,8 @@ The inefficiency occurs because:
 
 | Use Case | Chunk Size | Notes |
 |----------|-----------|-------|
-| **Streaming to disk** | 4-16 MiB | Matches block size, optimal |
-| **Network upload** | 4-8 MiB | Balance memory/efficiency |
+| **Streaming to disk** | 1-32 MiB | 1 MiB = BLOCK_SIZE minimum; larger amortizes Rayon overhead |
+| **Network upload** | 1-8 MiB | Balance memory/efficiency |
 | **In-memory processing** | Use `generate_data()` instead | Much faster |
 | **Small writes** | Avoid streaming | Use simple API |
 
@@ -158,14 +158,14 @@ cargo flamegraph --bin benchmark
 
 **Cause**: Using small chunk sizes with streaming generator
 
-**Fix**: Use chunk size >= 4 MiB (BLOCK_SIZE)
+**Fix**: Use chunk size >= 1 MiB (BLOCK_SIZE)
 
 ```rust
 // Before (hangs)
 let mut chunk = vec![0u8; 1024];
 
 // After (fast)
-let mut chunk = vec![0u8; 4 * 1024 * 1024];
+let mut chunk = vec![0u8; 1024 * 1024]; // 1 MiB = BLOCK_SIZE
 ```
 
 ### Issue: NUMA detection fails

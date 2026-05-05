@@ -84,7 +84,7 @@ Block mapping (round-robin):
   ...
 ```
 
-**Result**: 12 unique 4 MiB blocks generate 24 total blocks = 2:1 dedup ratio
+**Result**: 12 unique 1 MiB blocks generate 24 total blocks = 2:1 dedup ratio
 
 ### Phase 3: Compression Calculation
 
@@ -96,10 +96,10 @@ f_num = compress_factor - 1 = 2
 f_den = compress_factor = 3
 
 // Base copy length per block
-floor_len = (2 * 4_194_304) / 3 = 2_796_202 bytes
+floor_len = (2 * 1_048_576) / 3 = 699_050 bytes
 
 // Remainder to distribute
-rem = (2 * 4_194_304) % 3 = 2 bytes
+rem = (2 * 1_048_576) % 3 = 2 bytes
 
 // Distribute remainder across blocks using Bresenham-like algorithm
 Error accumulation ensures some blocks get floor_len + 1 bytes
@@ -339,8 +339,8 @@ The streaming generator has a fundamental inefficiency:
 let mut chunk = vec![0u8; 8192];
 gen.fill_chunk(&mut chunk);
 
-// Internally generates full 4 MiB block!
-let mut block = vec![0u8; 4_194_304];  // Expensive!
+// Internally generates full 1 MiB block!
+let mut block = vec![0u8; 1_048_576];  // Expensive!
 fill_block(&mut block, ...);
 
 // Copies only 8 KiB, discards 4 MB - 8 KiB
@@ -373,14 +373,14 @@ struct DataGenerator {
 
 ### Current Recommendation
 
-Use chunk_size >= BLOCK_SIZE (4 MiB) for efficiency:
+Use chunk_size >= BLOCK_SIZE (1 MiB) for efficiency:
 
 ```python
-# Good: 5 iterations for 20 MiB
+# Good: 20 iterations for 20 MiB (1 MiB = BLOCK_SIZE)
 gen = Generator(size=20_000_000)
-chunk = bytearray(4 * 1024 * 1024)
+chunk = bytearray(1024 * 1024)
 
-# Bad: 20,480 iterations for 20 MiB
+# Bad: 20,000 iterations for 20 MiB
 chunk = bytearray(1024)
 ```
 

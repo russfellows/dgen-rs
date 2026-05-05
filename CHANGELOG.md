@@ -2,7 +2,106 @@
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
 
-## [0.2.3] - 2026-04-15
+## [0.2.4] - 2026-05-04
+
+### Added
+
+#### Process-global Rayon pool with auto-sizing and sibling-process detection
+
+`DataGenerator` previously created a new `rayon::ThreadPool` on every call to
+`DataGenerator::new()`.  At high concurrency (c=28, c=32) this produced N×T OS threads
+simultaneously — 784 threads at c=28 on a 28-core machine — causing a throughput cliff.
+
+**Fix**: A `static GLOBAL_POOL: OnceLock<Arc<rayon::ThreadPool>>` is initialised once on
+the first `DataGenerator::new()` call and reused by all subsequent callers in the same
+process.  N concurrent callers share **one** pool; OS thread count stays bounded.
+
+**Auto-sizing** (no user configuration required) — priority order:
+
+1. `DGEN_THREADS` env var (explicit override)
+2. `RAYON_NUM_THREADS` env var
+3. `cpu_affinity ÷ live_sibling_dgen_processes` — reads `/proc/<pid>/` to count other
+   `dgen-data` processes on the same machine, divides affinity CPUs evenly between them
+4. Total logical CPUs (fallback)
+
+Sibling tracking uses PID files in `/tmp/dgen-<uid>/`.  Each process registers its PID
+on first use; a background thread removes the file on process exit.
+
+**Benchmark** (28-core Xeon, 8 MiB objects, 5 s runs):
+
+| Concurrency | Before (new pool/call) | After (global pool) |
+|:-----------:|:----------------------:|:-------------------:|
+| c=1         | ~5 GB/s                | ~5 GB/s             |
+| c=16        | ~52 GB/s               | ~52 GB/s            |
+| c=28        | ~45 GB/s (cliff)       | **~58 GB/s** (+29%) |
+
+#### `thread_local` module — canonical thread-local pool API for async servers
+
+New public module `dgen_data::thread_local` that canonicalises the
+`thread_local! { RefCell<RollingPool> }` pattern required by every async HTTP server
+that needs fake GET data.
+
+Before (boilerplate in every project):
+```rust
+use std::cell::RefCell;
+use dgen_data::RollingPool;
+thread_local! {
+    static POOL: RefCell<RollingPool> = RefCell::new(RollingPool::new(1, 1));
+}
+fn get_bytes(size: usize) -> bytes::Bytes {
+    POOL.with(|p| p.borrow_mut().next_slice(size))
+}
+```
+
+After (no boilerplate):
+```rust
+use dgen_data::thread_local::next_slice;
+fn get_bytes(size: usize) -> bytes::Bytes { next_slice(size) }
+```
+
+Public functions:
+- `next_slice(size) -> Bytes` — zero-copy for `size ≤ BLOCK_SIZE`, fresh generation for larger
+- `reconfigure(dedup, compress)` — change data characteristics; no-op if unchanged
+- `remaining() -> usize` — bytes left in current buffer before next refill (diagnostics)
+
+**Send-safety**: The `RefCell` borrow is acquired and released within a single
+synchronous expression before any `.await` point, so futures that call `next_slice` are
+`Send` and work correctly on Tokio's multi-thread runtime.
+
+#### `BLOCK_SIZE` re-exported at crate root
+
+`dgen_data::BLOCK_SIZE` is now re-exported directly at the crate root for convenience.
+Previously it was only accessible as `dgen_data::constants::BLOCK_SIZE`.
+
+```rust
+use dgen_data::BLOCK_SIZE;  // now works
+```
+
+### Fixed
+
+#### `get_affinity_cpu_count` — removed incorrect `#[cfg(feature = "numa")]` guard
+
+`get_affinity_cpu_count()` and `parse_cpu_list()` read `/proc/self/status` to count
+CPU-affinity bits — they require no hwlocality crate and work on any Linux build.
+They were previously gated by `#[cfg(feature = "numa")]`, which caused a compile error
+on default (non-NUMA) builds when `compute_pool_size()` called them unconditionally.
+The cfg guard is removed; the functions are now always compiled.
+
+### Removed
+
+#### `xor_stream` module / `UniqueXorStream`
+
+`UniqueXorStream` (XOR-keystream-based generator, ~15 GB/s per core) was developed
+for v0.2.4 but superseded by the global Rayon pool fix, which delivers equivalent
+aggregate throughput at high concurrency without a separate code path.  The module
+is removed to keep the API surface minimal.
+
+The Python `XorStream` class and `bench_xor_vs_parallel.py` example are also removed.
+`generate_buffer()`, `Generator`, and `BufferPool` remain the recommended Python APIs.
+
+---
+
+
 
 ### Added
 

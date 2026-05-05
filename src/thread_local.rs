@@ -189,7 +189,11 @@ mod tests {
     #[test]
     fn test_data_is_not_all_zeros() {
         let b = next_slice(4096);
-        assert_ne!(&b[..], &vec![0u8; 4096][..], "pool must not return zeroed data");
+        assert_ne!(
+            &b[..],
+            &vec![0u8; 4096][..],
+            "pool must not return zeroed data"
+        );
     }
 
     #[test]
@@ -198,7 +202,11 @@ mod tests {
         // different byte ranges (within the same backing block).
         let b1 = next_slice(64);
         let b2 = next_slice(64);
-        assert_ne!(&b1[..], &b2[..], "consecutive slices must contain different bytes");
+        assert_ne!(
+            &b1[..],
+            &b2[..],
+            "consecutive slices must contain different bytes"
+        );
     }
 
     #[test]

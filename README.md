@@ -1,6 +1,6 @@
 # dgen-py
 
-**The worlds fastest Python random data generation - with NUMA optimization and zero-copy interface**
+**The world's fastest Python random data generator — NUMA-aware, zero-copy, with configurable deduplication and compression ratios**
 
 [![Version](https://img.shields.io/badge/version-0.2.4-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
@@ -10,104 +10,39 @@
 
 ## Features
 
-- 🚀 **Blazing Fast**: 10 GB/s per core, up to 300 GB/s verified
-- ⚡ **Ultra-Fast Allocation**: `create_bytearrays()` for 1,280x faster pre-allocation than Python (v0.2.0)
-- 🔁 **Zero-Copy Rolling Pool**: `generate_buffer()` auto-uses a rolling pool for small objects — 16× speedup for 64 KB objects with no API change (NEW in v0.2.3)
-- 🏊 **Explicit Pool API**: `BufferPool` class for tight loops — pre-generate once, serve millions of slices (NEW in v0.2.3)
-- ⚡ **XorStream** (`v0.2.4`): `XorStream` class for dedup-safe generation without Rayon — ~15 GB/s/core, lock-free, zero per-call allocation on the `fill()` path; ideal for high-concurrency PUT benchmarks (NEW in v0.2.4)
-- 🎯 **Controllable Characteristics**: Configurable deduplication and compression ratios
-- 🔄 **Reproducible Data**: Seed parameter for identical data generation (v0.1.6) with dynamic reseeding (v0.1.7)
-- 🔬 **Multi-Process NUMA**: One Python process per NUMA node for maximum throughput
-- 🐍 **True Zero-Copy**: Python buffer protocol with direct memory access (no data copying)
-- 📦 **Streaming API**: Generate terabytes of data with constant 32 MB memory usage
-- 🧵 **Thread Pool Reuse**: Created once, reused across all operations
-- 🛠️ **Built with Rust**: Memory-safe, production-quality implementation
+- **Global Thread Pool** (v0.2.4): process-global `OnceLock<ThreadPool>` shared across all callers; auto-sizes via sibling-process detection so N concurrent callers never spawn N×N OS threads
+- **Rolling Pool / BufferPool** (v0.2.3): zero-copy slices from a pre-generated 1 MB block — 16× speedup for 64 KB objects; `generate_buffer()` uses it automatically
+- **Bulk Allocation** (v0.2.0): `create_bytearrays()` is 1,280× faster than Python list comprehension for pre-generating large buffer sets
+- **Dynamic Reseeding** (v0.1.7): `set_seed()` resets or alternates data streams without recreating `Generator`
+- **Reproducible Seeds** (v0.1.6): `seed=` parameter for deterministic, verifiable generation across runs
+- **Controllable Data**: configurable `dedup_ratio` and `compress_ratio` — unique among Python data generators; essential for realistic storage workload simulation
+- **Streaming API**: terabytes of data with constant 32 MB memory footprint
+- **Zero-Copy**: Python buffer protocol — direct memory access, no data copying between Rust and Python
+- **NUMA-Aware**: one-process-per-node architecture with local memory allocation and core affinity
+- **Built with Rust**: Xoshiro256++ RNG, Rayon thread-parallel generation, PyO3 bindings
 
-## Performance
+---
 
-### API Throughput by Object Size — v0.2.3 (12-vCPU VM, 31 GB RAM)
+## Why dgen-py? Because it is literally up to 200X faster than NumPy.
 
-Two usage patterns are benchmarked; run `cargo run --release --example speed-table` (Rust)
-or `python examples/speed_table.py` (Python) to reproduce on your hardware.
+NumPy, the most common Python data generator tops out around 2 GB/s with multiple cores. dgen-py generates at **memory-bus speed** using all cores in parallel. Tested exhaustively — all 5 NumPy bit-generators (MT19937, PCG64, PCG64DXSM, SFC64, Philox), single- and multi-threaded, with every trick a NumPy power-user would try:
 
-**Per-object**: One generation call per object, called repeatedly in a tight loop.
-Only generation time is measured; buffer deallocation (`munmap`/`free`) happens outside
-the timer. Three implementations compared:
-- `≤ 1 MB` **dgen-py**: `BufferPool.next_slice()` — zero-copy slice from pre-generated block
-- `> 1 MB` **dgen-py**: `Generator(size).get_chunk()` — new Rayon thread pool per call
-- **NumPy**: `np.random.default_rng().random(N//8)` — PCG64 float64, rng reused, single-threaded
+**System:** Intel Xeon Platinum 8280L, 28 vCPU — 100 GB test
 
-**Streaming (dgen-py only)**: One `Generator` for the entire run, 32 MB chunks.
-Thread pool created **once** and reused for every `fill_chunk()` call. NumPy has no
-equivalent streaming API.
+| Method | Threads | Throughput | vs Baseline | Memory Required |
+|--------|:-------:|:----------:|:-----------:|:---------------:|
+| `os.urandom()` (baseline) | 1 | 0.34 GB/s | 1× | minimal |
+| NumPy best-case (SFC64, 28 threads)† | 28 | ~1.4 GB/s | 4× | 100 GB RAM |
+| **dgen-py streaming (32 MB chunks)** | **28** | **69.09 GB/s** | **203×** | **32 MB RAM** |
 
-| Object | Rust per-obj | dgen-py per-obj | NumPy per-obj | dgen-py stream |
-|--------|:------------:|:---------------:|:-------------:|:--------------:|
-| 64 B   |   894 MB/s   |    228 MB/s     |    73 MB/s    |   55–59 GB/s   |
-| 512 B  |  1.77 GB/s   |   1.24 GB/s     |   476 MB/s    |   57–61 GB/s   |
-| 4 KB   |  1.79 GB/s   |   1.84 GB/s     |  1.57 GB/s    |   59–62 GB/s   |
-| 64 KB  |  1.72 GB/s   |   1.96 GB/s     |  2.36 GB/s    |   56–59 GB/s   |
-| 1 MB   |  1.74 GB/s   |   2.00 GB/s     |  2.46 GB/s    |   57–61 GB/s   |
-| 10 MB  |  8.04 GB/s   |   8.35 GB/s     |  2.46 GB/s    |   53–58 GB/s   |
-| 100 MB | 16.52 GB/s   |  17.45 GB/s     |  1.91 GB/s    |   58–61 GB/s   |
-| 1 GB   | 17.89 GB/s   |  19.75 GB/s     |  1.87 GB/s    |   52–61 GB/s   |
-| 10 GB  |**19.76 GB/s**| **20.06 GB/s**  |  1.83 GB/s    | **55–63 GB/s** |
+† *Tried all 5 bit-generators and every multi-threading strategy. All single-threaded generators land at 0.45–0.57 GB/s — switching generator makes no difference. Threading tops out at ~1.4 GB/s because `rng.bytes()` always allocates a new Python object and the GIL serializes those allocations. `integers(out=...)` doesn't exist. There is no way to make NumPy faster for this task.*
 
-**Key observations:**
-- **NumPy plateaus at ~2.5 GB/s** for objects ≥ 1 MB — PCG64 is single-threaded and
-  saturates at one core's DRAM write bandwidth.  For 100 MB+ objects, the working set
-  spills out of L3 cache and NumPy drops to ~1.9 GB/s.
-- **dgen-py and Rust scale to 17–20 GB/s** at 100 MB+ by filling all 12 cores with
-  Xoshiro256++ in parallel; at 10 GB they hit peak DRAM write bandwidth (~20 GB/s).
-- **NumPy is faster than dgen-py for 64 KB–1 MB objects** (2.36–2.46 GB/s vs 1.96–2.00 GB/s):
-  at those sizes the PCG64 generator fits entirely in L2/L3 cache and runs faster than
-  dgen-py's per-call pool-slice overhead.  Below 64 KB, dgen-py pulls ahead via its
-  zero-copy pool; above 1 MB, dgen-py's parallel Rayon threads dominate.
-- **Streaming (dgen-py)** hits 52–63 GB/s by reusing the Rayon thread pool across 32 MB
-  chunks; the working-set stays in L3 cache and only final writeback reaches DRAM.
-- **NumPy has no streaming API** for comparison.
+- **50× faster than the best NumPy**, **203× faster than `os.urandom`**
+- **3,000× less memory** at scale (32 MB working set vs. 100 GB for a 100 GB dataset)
+- **Dgen-Py achieves > 300 GB/s** on large Gen5 CPU systems with 32 cores or more
+- **Only dgen-py** supports `dedup_ratio` and `compress_ratio` — `os.urandom` and NumPy always produce max-entropy data, making it unsuitable for realistic storage workload testing
 
-### Streaming Benchmark - 100 GB Test
-
-Comparison of streaming random data generation methods on a 12-core system:
-
-| Method | Throughput | Speedup vs Baseline | Memory Required |
-|--------|------------|---------------------|-----------------|
-| **os.urandom()** (baseline) | 0.34 GB/s | 1.0x | Minimal |
-| **NumPy Multi-Thread** | 1.06 GB/s | 3.1x | 100 GB RAM* |
-| **Numba JIT Xoshiro256++** (streaming) | 57.11 GB/s | 165.7x | 32 MB RAM |
-| **dgen-py v0.1.5** (streaming) | **58.46 GB/s** | **169.6x** | **32 MB RAM** |
-
-\* *NumPy requires full dataset in memory (10 GB tested, would need 100 GB for 100 GB dataset)*
-
-**Key Findings:**
-- **dgen-py matches Numba's streaming performance** (58.46 vs 57.11 GB/s)
-- **55x faster than NumPy** while using **3,000x less memory** (32 MB vs 100 GB)
-- **Streaming architecture**: Can generate unlimited data with only 32 MB RAM
-- **Per-core throughput**: 4.87 GB/s (12 cores)
-
-> **⚠️ Critical for Storage Testing**: **ONLY dgen-py** supports configurable **deduplication and compression ratios**. All other methods (os.urandom, NumPy, Numba) generate purely random data with maximum entropy, making them unsuitable for realistic storage system testing. Real-world storage workloads require controllable data characteristics to test deduplication engines, compression algorithms, and storage efficiency—capabilities unique to dgen-py.
-
-### Multi-NUMA Scalability - GCP Emerald Rapid
-
-**Scalability testing** on Google Cloud Platform Intel Emerald Rapid systems (1024 GB workload, compress=1.0):
-
-| Instance | Physical Cores | NUMA Nodes | Aggregate Throughput | Per-Core | Scaling Efficiency |
-|----------|----------------|------------|---------------------|----------|-------------------|
-| **C4-8** | 4 | 1 (UMA) | 36.26 GB/s | 9.07 GB/s | Baseline |
-| **C4-16** | 8 | 1 (UMA) | **86.41 GB/s** | **10.80 GB/s** | **119%** |
-| **C4-32** | 16 | 1 (UMA) | **162.78 GB/s** | **10.17 GB/s** | **112%** |
-| **C4-96** | 48 | 2 (NUMA) | 248.53 GB/s | 5.18 GB/s | 51%* |
-
-\* *NUMA penalty: 49% per-core reduction on multi-socket systems, but still achieves highest absolute throughput*
-
-**Key Findings:**
-- **Excellent UMA scaling**: 112-119% efficiency on single-NUMA systems (super-linear due to larger L3 cache)
-- **Per-core performance**: 10.80 GB/s on C4-16 (3.0x improvement vs dgen-py v0.1.3's 3.60 GB/s)
-- **Compression tradeoff**: compress=2.0 provides 1.3-1.5x speedup, but makes data compressible (choose based on your test requirements, not performance)
-- **Storage headroom**: Even modest 8-core systems exceed 86 GB/s (far beyond typical storage requirements)
-
-**See [docs/BENCHMARK_RESULTS_V0.1.5.md](docs/BENCHMARK_RESULTS_V0.1.5.md) for complete analysis**
+---
 
 ## Installation
 
@@ -117,460 +52,279 @@ Comparison of streaming random data generation methods on a 12-core system:
 pip install dgen-py
 ```
 
-Default PyPI wheels are built without NUMA/hwloc support so they remain broadly compatible across Linux distributions.
-
-### Python Version Support
-
-- Supported: Python 3.11+
-- Not supported: Python 3.10 and older
+Requires Python 3.11+. PyPI wheels are built without NUMA/hwloc so they run on all Linux distributions. For UMA and single-node cloud systems, performance is unaffected.
 
 ### Enable NUMA Support (Source Build)
 
-NUMA-aware topology and NUMA-local allocation require building from source with the `numa` feature.
-
-```bash
-# System deps (Linux)
-# Ubuntu/Debian:
-sudo apt-get install libudev-dev libhwloc-dev
-
-# RHEL/CentOS/Fedora:
-sudo yum install systemd-devel hwloc-devel
-
-# Build from source with NUMA enabled
-pip install --no-binary dgen-py dgen-py \
-    --config-settings=build-args="--features python-bindings,numa,thread-pinning"
-```
-
-### System Requirements
-
-**For source builds with NUMA support (Linux only):**
 ```bash
 # Ubuntu/Debian
 sudo apt-get install libudev-dev libhwloc-dev
 
 # RHEL/CentOS/Fedora
 sudo yum install systemd-devel hwloc-devel
+
+pip install --no-binary dgen-py dgen-py \
+    --config-settings=build-args="--features python-bindings,numa,thread-pinning"
 ```
 
-**Note**: Without NUMA/hwloc, dgen-py still delivers high performance on UMA and single-node cloud systems. The limitation is on true multi-NUMA systems where NUMA-local memory placement and topology-aware optimization are not available.
+---
 
 ## Quick Start
 
-### Version 0.2.4: XorStream — High-Concurrency Dedup-Safe Generation 🎉
-
-`XorStream` is a lock-free data generator optimised for **high-concurrency storage benchmarks**
-(≥ 32 concurrent PUT threads).  It produces guaranteed-unique, dedup-safe data at ~15 GB/s per
-core with **zero per-call allocation** on the `fill()` path.
-
-#### Design
-
-A 1 MiB base buffer is filled once with Xoshiro256++ output at construction time.  Each `fill()`
-call atomically increments a counter to obtain a unique `object_id`, derives a Xoshiro256++ seed
-via splitmix64 (one high-avalanche pass that converts sequential IDs into uncorrelated seeds), then
-XORs the resulting keystream against the cyclic 1 MiB base into the output buffer.  No Rayon, no
-mutex — just one `AtomicU64::fetch_add`.
-
-#### When to choose XorStream
-
-| Scenario | Best choice |
-|---|---|
-| High concurrency ≥ 32 PUT workers | **`XorStream`** — no Rayon overhead |
-| Medium objects 1–32 MiB | **`XorStream`** — fill() has no per-call alloc |
-| Small objects < 1 MiB | `BufferPool` / `generate_buffer()` |
-| Very large objects or streaming | `Generator.fill_chunk()` |
-| Dedup-safe requirement (required) | **`XorStream`** or `generate_buffer(dedup_ratio=1)` |
-| Compressible data needed | `Generator` / `generate_buffer(compress_ratio=N)` |
-
-#### Python usage (uv / pip)
-
-```python
-import dgen_py
-import time
-
-stream = dgen_py.XorStream()
-
-# --- Fastest path: fill a pre-allocated bytearray in-place ---
-# No heap allocation on the hot path; only the output buffer is written.
-obj_size = 8 * 1024 * 1024      # 8 MiB
-buf = bytearray(obj_size)
-
-N = 1000
-t0 = time.perf_counter()
-for _ in range(N):
-    stream.fill(buf)
-    # send buf to your storage client here
-elapsed = time.perf_counter() - t0
-print(f"fill()  {N}× 8 MiB → {N * obj_size / elapsed / 1e9:.2f} GB/s")
-# example output: fill() 1000× 8 MiB → 14.7 GB/s
-
-# --- Convenience path: allocate + fill in one call ---
-# Returns a BytesView (zero-copy via Python buffer protocol).
-data = stream.generate(8 * 1024 * 1024)
-view = memoryview(data)             # zero-copy access to raw bytes
-raw  = bytes(data)                  # copies to a Python bytes object
-
-import numpy as np
-arr = np.frombuffer(view, dtype=np.uint8)   # zero-copy numpy array
-print(f"numpy shape: {arr.shape}")          # (8388608,)
-
-# --- Track objects generated ---
-print(f"objects_generated: {stream.objects_generated}")
-
-# --- Multiple threads sharing one stream (safe — AtomicU64 counter) ---
-import threading
-
-shared_stream = dgen_py.XorStream()
-buf_tls = [bytearray(8 * 1024 * 1024) for _ in range(4)]
-results = []
-
-def worker(tid):
-    for _ in range(250):
-        shared_stream.fill(buf_tls[tid])
-    results.append(tid)
-
-threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
-for t in threads: t.start()
-for t in threads: t.join()
-print(f"Concurrent workers done, objects_generated: {shared_stream.objects_generated}")
-# → 1000 unique objects generated across 4 threads, guaranteed dedup-safe
-```
-
-#### Rust usage
-
-```rust
-use dgen_data::UniqueXorStream;
-
-fn main() {
-    let stream = UniqueXorStream::new();      // 1 MiB base buffer, seeded from entropy
-
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-
-    // fill() takes &self — call concurrently from any number of threads
-    stream.fill(&mut buf);   // object 0
-    stream.fill(&mut buf);   // object 1 — provably different bytes
-
-    println!("Objects generated: {}", stream.objects_generated());
-
-    // Use as a process-level singleton with OnceLock
-    use std::sync::OnceLock;
-    static XOR: OnceLock<UniqueXorStream> = OnceLock::new();
-    let xor = XOR.get_or_init(UniqueXorStream::new);
-
-    // Every call from any thread gets a unique output — lock-free
-    xor.fill(&mut buf);
-}
-```
-
-`UniqueXorStream` is also re-exported at the crate root:
-
-```rust
-use dgen_data::UniqueXorStream;  // preferred
-// or
-use dgen_data::xor_stream::UniqueXorStream;
-```
-
-#### v0.2.4 also includes: Rayon global pool fix
-
-`generate_data()` previously created a new `ThreadPoolBuilder` pool on every call.
-At c=32 concurrent callers this caused 32×28=896 concurrent OS thread create/destroy
-operations, producing a **24% throughput cliff** on 8 MiB objects.
-
-**Fix**: the non-NUMA path now calls `par_chunks_mut().enumerate().for_each()` on
-the existing global Rayon pool instead of building a new pool per call.
-
-Benchmark (8 MiB PUT, loopback, 28-core Xeon):
-
-| Concurrency | Before (v0.2.3) | After (v0.2.4) |
-|:-----------:|:---------------:|:--------------:|
-| c=16        | 1,308 MiB/s     | 1,340 MiB/s    |
-| c=32        | **1,041 MiB/s** | **1,987 MiB/s** (+91%) |
-| c=64        | **1,049 MiB/s** | **2,262 MiB/s** (+116%) |
-
-#### v0.2.4 also includes: `thread_local` module
-
-Canonical `thread_local::next_slice()` API for async HTTP servers — eliminates the
-boilerplate `thread_local! { RefCell<RollingPool> }` pattern:
-
-```rust
-use dgen_data::thread_local::next_slice;
-
-// Inside a stream::unfold closure (before any .await):
-fn get_chunk(chunk_size: usize) -> bytes::Bytes {
-    next_slice(chunk_size)   // zero-copy Arc slice, no re-seeding, no locking
-}
-```
-
-### Version 0.2.3: Rolling Pool for Small-Object Workloads 🎉
-
-dgen-py v0.2.2 had a hidden inefficiency: `generate_buffer(size)` always generated **at least 1 MB** internally (the dgen-data block size floor), even when you only asked for 64 KB. That meant 15/16 of every allocation was generated and thrown away — a **16× waste**.
-
-v0.2.3 eliminates this with a **rolling buffer pool**. A single 1 MB block is generated, then served as zero-copy slices. Refills happen only on exhaustion or config change.
-
-#### Benchmark results (1 GB total output per scenario, release build):
-
-```
-── BASELINE (v0.2.2): generate_data_simple() ───────────────────────────────
-
-Strategy                     Obj size       Calls      Output  Throughput   Alloc×
-----------------------------------------------------------------------------------
-generate_data_simple            64 KB       16384        1 GB    107 MB/s     16.0x
-generate_data_simple             1 MB        1024        1 GB   1.78 GB/s      1.0x
-generate_data_simple             1 GB           1        1 GB   9.73 GB/s      1.0x
-----------------------------------------------------------------------------------
-
-── ROLLING POOL (v0.2.3): RollingPool::next_slice() ─────────────────────────
-
-Strategy                     Obj size       Calls      Output  Throughput   Alloc×
-----------------------------------------------------------------------------------
-RollingPool::next_slice         64 KB       16384        1 GB   1.73 GB/s      1.0x
-RollingPool::next_slice          1 MB        1024        1 GB   1.74 GB/s      1.0x
-RollingPool::next_slice          1 GB           1        1 GB   9.49 GB/s      0.0x
-----------------------------------------------------------------------------------
-
-── IMPROVEMENT SUMMARY ──────────────────────────────────────────────────────
-Object size             Baseline         RollingPool     Speedup
-------------------------------------------------------------------
-64 KB                   107 MB/s           1.73 GB/s      16.19x
-1 MB                   1.78 GB/s           1.74 GB/s       0.98x
-1 GB                   9.73 GB/s           9.49 GB/s       0.98x
-------------------------------------------------------------------
-```
-
-**Key design properties:**
-- 64 KB objects: **16× throughput improvement** — eliminates the 1 MB minimum-allocation waste
-- 1 MB objects: **unchanged** — exact pool block size, same generation cost as before
-- 1 GB objects: **unchanged** — large-object bypass path is unaffected
-- **Zero regression** for any object size ≥ 1 MB
-
-#### Using `generate_buffer()` (automatic, no changes needed):
-
-For object sizes < 1 MB without NUMA pinning, `generate_buffer()` **automatically uses the pool**. No code change required:
+Four patterns cover the most common use cases:
 
 ```python
 import dgen_py
 
-# This call is now 16× faster for 64 KB — no API change required
-buf = dgen_py.generate_buffer(64 * 1024)
-print(len(buf))  # 65536
-print(type(buf)) # <class 'dgen_py.BytesView'> — zero-copy Python buffer
+# ── 1. Streaming ────────────────────────────────────────────────────────────
+# Generates any amount of data with constant 32 MB memory, all cores used.
+gen = dgen_py.Generator(size=100 * 1024**3)   # 100 GB total
+buf = bytearray(gen.chunk_size)                # allocate one 32 MB reusable buffer
 
-# Works exactly as before for large objects
-big = dgen_py.generate_buffer(4 * 1024 * 1024)  # 4 MB — no change
+while not gen.is_complete():
+    n = gen.fill_chunk(buf)                    # fills buf in-place, returns bytes written
+    if n == 0:
+        break
+    output.write(memoryview(buf)[:n])          # or upload to S3, send over network, etc.
+
+# ── 2. Small slices (< 1 MB objects) ────────────────────────────────────────
+# BufferPool generates one 1 MB block and serves zero-copy slices from it.
+# No re-generation until the block is exhausted; ideal for tight per-object loops.
+pool = dgen_py.BufferPool(dedup_ratio=1.0, compress_ratio=1.0)
+
+for _ in range(10_000):
+    obj = pool.next_slice(64 * 1024)           # 64 KB zero-copy BytesView; pool auto-refills
+    storage_client.put(obj)
+
+# For one-off slices, generate_buffer() uses the same pool automatically:
+buf = dgen_py.generate_buffer(256 * 1024)      # 256 KB, zero-copy, no setup needed
+
+# ── 3. Bulk buffer allocation ────────────────────────────────────────────────
+# create_bytearrays() is ~1,280× faster than a Python list comprehension.
+# Python: [bytearray(32*1024**2) for _ in range(768)] takes seconds or more.
+# dgen-py: direct C API (PyByteArray_Resize) from Rust — completes in milliseconds.
+n_chunks = 768
+chunk_sz  = 32 * 1024**2                       # 32 MB each → 24 GB total
+
+buffers = dgen_py.create_bytearrays(count=n_chunks, size=chunk_sz)
+
+gen = dgen_py.Generator(size=n_chunks * chunk_sz)
+for buf in buffers:
+    gen.fill_chunk(buf)                        # fill all buffers at full parallel speed
+
+# ── 4. Seed and reset ────────────────────────────────────────────────────────
+# seed= makes output reproducible across runs.
+# set_seed() resets or alternates streams without recreating the Generator.
+gen = dgen_py.Generator(size=100 * 1024**3, seed=42)
+buf = bytearray(gen.chunk_size)
+
+gen.fill_chunk(buf)        # stream A — deterministic, same every run with seed=42
+gen.set_seed(99)           # switch to a different stream
+gen.fill_chunk(buf)        # stream B
+gen.set_seed(42)           # rewind back to the beginning of stream A
+gen.fill_chunk(buf)        # identical bytes to the very first fill_chunk above
 ```
 
-#### Using `BufferPool` (explicit pool for tight loops):
+See [API Usage](#api-usage) below for detailed options on each pattern.
 
-`BufferPool` gives you **explicit control** over the pool for scenarios where you pre-generate many small objects in a loop — for example, image simulation or small-object PUT benchmarks:
+---
+
+## API Usage
+
+Three patterns cover the main scaling scenarios. Choose based on object size and concurrency.
+
+### Pattern 1 — Streaming: one process, all cores (`Generator + fill_chunk`)
+
+One `Generator` per process with `max_threads=None`. The global Rayon pool parallelises
+each `fill_chunk()` call across all cores using 1 MiB Xoshiro256++ blocks.
+Best for large objects and single-process bulk generation.
 
 ```python
-import dgen_py
-
-# Create a pool with your desired data characteristics
-pool = dgen_py.BufferPool(
-    dedup_ratio=1.0,      # No deduplication
-    compress_ratio=1.0    # Incompressible
+gen = dgen_py.Generator(
+    size=100 * 1024**3,      # total bytes to generate
+    dedup_ratio=1.0,         # 1.0 = no dedup, 2.0 = 2:1, etc.
+    compress_ratio=1.0,      # 1.0 = incompressible, 2.0 = 2:1 compressible
+    numa_mode="auto",        # auto-detect topology
+    max_threads=None,        # use all available cores
+    # chunk_size=64*1024**2  # optional: override default 32 MB
 )
-
-# Generate 10,000 × 64 KB image-like objects
-# Each next_slice() is a zero-copy Bytes window — no allocation cost
-images = [pool.next_slice(64 * 1024) for _ in range(10_000)]
-print(f"Generated {sum(len(img) for img in images) / 1e6:.1f} MB")  # 640.0 MB
-
-# Slices behave like bytes — pass directly to your storage client
-for img in images:
-    # e.g. s3_client.put_object(Body=img, ...)
-    pass
+buf = bytearray(gen.chunk_size)
+while not gen.is_complete():
+    n = gen.fill_chunk(buf)
+    if n == 0:
+        break
+    output.write(memoryview(buf)[:n])
 ```
 
-**Pool property accessors:**
+**Streaming throughput by chunk size (28-core Xeon):**
+
+| Chunk size | Throughput |
+|:---:|:---:|
+| 32 MB (default) | ~68 GB/s |
+| 64 MB | ~73 GB/s |
+
+> 64 MB chunks give ~7% higher throughput on newer CPUs (Sapphire/Emerald Rapid) with large L3 caches.
+
+### Pattern 2 — Concurrent: N processes, 1 thread each (`max_threads=1`)
+
+Each process creates its own `Generator(max_threads=1)` — pure sequential Xoshiro256++
+per process, no inter-process pool contention. Scales linearly because each process runs
+an independent RNG. Ideal for DLIO DataLoader workers and multi-threaded server benchmarks.
 
 ```python
-pool = dgen_py.BufferPool(dedup_ratio=2.0, compress_ratio=4.0)
-
-print(pool.remaining)      # bytes left before next refill (0..1_048_576)
-print(pool.dedup_ratio)    # int, current dedup factor
-print(pool.compress_ratio) # int, current compress factor
+# Each Python process (e.g. DLIO DataLoader worker):
+gen = dgen_py.Generator(size=256 * 1024**3, max_threads=1)
+buf = bytearray(object_size)
+while generating:
+    gen.fill_chunk(buf)
+    output.write(buf)
 ```
 
-**Changing data characteristics mid-stream:**
+**Aggregate throughput (28-core Xeon, 8 MiB objects, 5 s):**
+
+| N processes | Aggregate | Per-process |
+|:-----------:|:---------:|:-----------:|
+| 1  | 5.2 GB/s  | 5.2 GB/s |
+| 4  | 17.8 GB/s | 4.5 GB/s |
+| 8  | 27.9 GB/s | 3.5 GB/s |
+| 16 | 52.7 GB/s | 3.3 GB/s |
+| 28 | **58.6 GB/s** | 2.1 GB/s |
+
+Aggregate throughput saturates DRAM bandwidth (~58 GB/s) at 28 processes.
+
+### Pattern 3 — Small Objects < 1 MB: `BufferPool`
+
+For high-frequency small-object workloads (JPEG/PNG images, NPZ shards, etc.),
+`BufferPool` generates one 1 MB backing block and serves zero-copy slices with no
+re-generation overhead until exhausted. At 315 KB this saves ~70% of generation work
+versus a fresh `Generator` per call.
+
+`generate_buffer(size)` uses a thread-local pool automatically for `size < 1 MB` —
+no code change needed for existing single-threaded callers.
 
 ```python
-pool = dgen_py.BufferPool()
+# Automatic (single-threaded, no changes needed)
+buf = dgen_py.generate_buffer(64 * 1024)   # BytesView, zero-copy, from pool
 
-# Generate incompressible objects
-for _ in range(1000):
-    obj = pool.next_slice(64 * 1024)
+# Explicit pool for tight loops, multiple helpers, or custom config
+pool = dgen_py.BufferPool(dedup_ratio=1.0, compress_ratio=1.0)
 
-# Switch to compressible — forces one pool refill, then continues zero-copy
-pool.reconfigure(dedup_ratio=1.0, compress_ratio=4.0)
+for _ in range(10_000):
+    obj = pool.next_slice(64 * 1024)       # zero-copy; refills automatically
+    storage_client.put(obj)
 
-for _ in range(1000):
-    obj = pool.next_slice(64 * 1024)  # now compressible data
+# Change characteristics mid-stream (forces one pool refill, then continues zero-copy)
+pool.reconfigure(compress_ratio=4.0)
+
+print(pool.remaining)       # bytes left before next refill (0..1_048_576)
+print(pool.compress_ratio)  # current compress factor
 ```
 
 **When to use `BufferPool` vs `generate_buffer()`:**
 
 | Scenario | Best choice |
 |----------|-------------|
-| Existing code, small objects < 1 MB | `generate_buffer()` — automatic, no code change |
-| New code, tight loop, many small objects | `BufferPool` — explicit pool, identical performance |
-| Large objects ≥ 1 MB | Either — both use the same large-object bypass path |
-| NUMA-pinned workloads | `generate_buffer(..., numa_node=N)` — pool is bypassed per design |
+| Existing code, objects < 1 MB | `generate_buffer()` — automatic, no code change |
+| New code, tight loop, many small objects | `BufferPool` — explicit, identical performance |
+| Objects ≥ 1 MB | Either — both use the same large-object bypass path |
+| NUMA-pinned workloads | `generate_buffer(..., numa_node=N)` — pool bypassed per design |
 
-### Version 0.2.0: Ultra-Fast Bulk Buffer Allocation 🎉
+### Bulk Pre-Allocation: `create_bytearrays` (v0.2.0)
 
-For scenarios where you need to **pre-generate all data in memory** before writing, use `create_bytearrays()` for **1,280x faster allocation** than Python list comprehension:
+When you need all data in RAM before writing (DLIO benchmark, batch loaders):
 
 ```python
-import dgen_py
-import time
+total   = 24 * 1024**3   # 24 GB
+chunk   = 32 * 1024**2   # 32 MB per chunk
+n       = total // chunk  # 768 chunks
 
-# Pre-generate 24 GB in 32 MB chunks 
-total_size = 24 * 1024**3  # 24 GB
-chunk_size = 32 * 1024**2  # 32 MB chunks
-num_chunks = total_size // chunk_size  # 768 chunks
+# 1,280× faster than [bytearray(chunk) for _ in range(n)]
+buffers = dgen_py.create_bytearrays(count=n, size=chunk)   # ~10 ms
 
-# ✅ FAST: Rust-optimized allocation (7-11 ms for 24 GB!)
-start = time.perf_counter()
-chunks = dgen_py.create_bytearrays(count=num_chunks, size=chunk_size)
-alloc_time = time.perf_counter() - start
-print(f"Allocation: {alloc_time*1000:.1f} ms @ {(total_size/(1024**3))/alloc_time:.0f} GB/s")
-
-# Fill buffers with high-performance generation
-gen = dgen_py.Generator(size=total_size, numa_mode="auto", max_threads=None)
-
-start = time.perf_counter()
-for buf in chunks:
+gen = dgen_py.Generator(size=total, max_threads=None)
+for buf in buffers:
     gen.fill_chunk(buf)
-gen_time = time.perf_counter() - start
-print(f"Generation: {gen_time:.2f}s @ {(total_size/(1024**3))/gen_time:.1f} GB/s")
 
-# Now write to storage...
-# for buf in chunks:
-#     f.write(buf)
+for buf in buffers:
+    f.write(buf)
 ```
 
-**Performance (12-core system):**
-```
-Allocation: 10.9 ms @ 2204 GB/s  # 1,280x faster than Python!
-Generation: 1.59s @ 15.1 GB/s
-```
+Uses Python C API (`PyByteArray_Resize`) directly from Rust; for 32 MB chunks glibc
+uses `mmap` (≥128 KB threshold) for zero-copy page allocation.
 
-**Performance comparison:**
-| Method | Allocation Time (24 GB) | Speedup |
-|--------|------------------------|---------|
-| Python `[bytearray(size) for _ in ...]` | 12-14 seconds | 1x (baseline) |
-| `dgen_py.create_bytearrays()` | **7-11 ms** | **1,280x faster** |
-
-**When to use:**
-- ✅ Pre-generation pattern (DLIO benchmark, batch data loading)
-- ✅ Need all data in RAM before writing
-- ❌ Streaming - use `Generator.fill_chunk()` with reusable buffer instead (see below)
-
-**Why it's fast:**
-- Uses Python C API (`PyByteArray_Resize`) directly from Rust
-- For 32 MB chunks, glibc automatically uses `mmap` (≥128 KB threshold)
-- Zero-copy kernel page allocation, no heap fragmentation
-- Bypasses Python interpreter overhead
-
-### Version 0.1.7: Dynamic Seed Changes
-
-Dynamically change the random seed to **reset the data stream** or create **alternating patterns** without recreating the Generator:
+### Reproducible Data: `seed` and `set_seed` (v0.1.6 / v0.1.7)
 
 ```python
-import dgen_py
-
-gen = dgen_py.Generator(size=100 * 1024**3, seed=1111)
-buffer = bytearray(10 * 1024**2)
-
-# Generate data with seed A
-gen.set_seed(1111)
-gen.fill_chunk(buffer)  # Pattern A
-
-# Switch to seed B
-gen.set_seed(2222)
-gen.fill_chunk(buffer)  # Pattern B
-
-# Back to seed A - resets the stream!
-gen.set_seed(1111)
-gen.fill_chunk(buffer)  # SAME as first chunk (pattern A)
-```
-
-**Use cases:**
-- RAID stripe testing with alternating patterns per drive
-- Multi-phase AI/ML workloads (different patterns for metadata/payload/footer)
-- Complex reproducible benchmark scenarios
-- Low-overhead stream reset (no Generator recreation)
-
-### Version 0.1.6: Reproducible Data Generation
-
-Generate **identical data across runs** for reproducible benchmarking and testing:
-
-```python
-import dgen_py
-
-# Reproducible mode - same seed produces identical data
+# Same seed → identical bytes every run
 gen1 = dgen_py.Generator(size=10 * 1024**3, seed=12345)
 gen2 = dgen_py.Generator(size=10 * 1024**3, seed=12345)
-# ⇒ gen1 and gen2 produce IDENTICAL data streams
+# gen1 and gen2 produce IDENTICAL streams
 
-# Non-deterministic mode (default) - different data each run  
-gen3 = dgen_py.Generator(size=10 * 1024**3)  # seed=None (default)
+# No seed → different data each run (default)
+gen3 = dgen_py.Generator(size=10 * 1024**3)
+
+# set_seed() resets or alternates streams without recreating Generator
+gen = dgen_py.Generator(size=100 * 1024**3, seed=1111)
+buf = bytearray(10 * 1024**2)
+
+gen.set_seed(1111); gen.fill_chunk(buf)  # Pattern A
+gen.set_seed(2222); gen.fill_chunk(buf)  # Pattern B
+gen.set_seed(1111); gen.fill_chunk(buf)  # SAME as first chunk — Pattern A
 ```
 
-**Use cases:**
-- 🔬 Reproducible benchmarking: Compare storage systems with identical workloads
-- ✅ Consistent testing: Same test data across CI/CD pipeline runs
-- 🐛 Debugging: Regenerate exact data streams for issue investigation
-- 📊 Compliance: Verifiable data generation for audits
+**Use cases:** RAID stripe testing with alternating patterns, multi-phase AI/ML workloads,
+reproducible CI/CD benchmarks, stream reset without Generator recreation.
 
-### Streaming API (Basic Usage)
+### Data Characteristics: `dedup_ratio` and `compress_ratio`
 
-For **unlimited data generation with constant memory usage**, use the streaming API:
+Choose based on the workload you are testing — not performance:
 
-```python
-import dgen_py
-import time
+| `compress_ratio` | Data character | Typical use |
+|:---:|---|---|
+| 1.0 | Incompressible (encrypted, archives) | Test compression engines accurately |
+| 2.0 | 2:1 compressible (text, logs) | Realistic mixed workloads |
+| 4.0+ | Highly compressible | Dedup/compress stress tests |
 
-# Generate 100 GB with streaming (only 32 MB in memory at a time)
-gen = dgen_py.Generator(
-    size=100 * 1024**3,      # 100 GB total
-    dedup_ratio=1.0,         # No deduplication 
-    compress_ratio=1.0,      # Incompressible data
-    numa_mode="auto",        # Auto-detect NUMA topology
-    max_threads=None         # Use all available cores
-)
+`compress_ratio=2.0` generates data ~30–50% faster (more zero bytes) but inflates
+storage efficiency metrics if compression is enabled on the target system.
+`dedup_ratio` has < 1% performance variance.
 
-# Create single reusable buffer
-buffer = bytearray(gen.chunk_size)
+### Concurrent Callers and Global Pool (v0.2.4)
 
-# Stream data in chunks (zero-copy, parallel generation)
-start = time.perf_counter()
-while not gen.is_complete():
-    nbytes = gen.fill_chunk(buffer)
-    if nbytes == 0:
-        break
-    # Write to file/network: buffer[:nbytes]
+Before v0.2.4, each `DataGenerator::new()` created a fresh Rayon `ThreadPool`.
+At c=28 concurrent callers this spawned 784 OS threads on 28 cores, causing a
+throughput cliff. The fix is a process-global `OnceLock<Arc<ThreadPool>>` shared
+by all callers.
 
-duration = time.perf_counter() - start
-print(f"Throughput: {(100 / duration):.2f} GB/s")
+**Auto-sizing priority:**
+1. `DGEN_THREADS` env var
+2. `RAYON_NUM_THREADS` env var
+3. `cpu_affinity ÷ live_sibling_dgen_processes` — PID files in `/tmp/dgen-<uid>/`
+4. Total logical CPUs (fallback)
+
+**Concurrency benchmark (28-core Xeon, 8 MiB objects, 5 s):**
+
+| Concurrency | Before (new pool per call) | After (global pool) |
+|:-----------:|:--------------------------:|:-------------------:|
+| c=1  | ~5 GB/s  | ~5 GB/s |
+| c=16 | ~52 GB/s | ~52 GB/s |
+| c=28 | ~45 GB/s (contention) | **~58 GB/s** (+29%) |
+
+### `thread_local` Module (v0.2.4, Rust API)
+
+Canonical zero-copy API for async HTTP servers — eliminates `thread_local! { RefCell<RollingPool> }` boilerplate:
+
+```rust
+use dgen_data::thread_local::next_slice;
+
+fn get_chunk(chunk_size: usize) -> bytes::Bytes {
+    next_slice(chunk_size)   // zero-copy Arc slice, no re-seeding, no locking
+}
 ```
-
-**Example output (8-core system):**
-```
-Throughput: 86.41 GB/s
-```
-
-**When to use:**
-- ✅ Generating very large datasets (> available RAM)
-- ✅ Consistent low memory footprint (32 MB)
-- ✅ Network streaming, continuous data generation
 
 ### System Information
 
 ```python
-import dgen_py
-
 info = dgen_py.get_system_info()
 if info:
     print(f"NUMA nodes: {info['num_nodes']}")
@@ -578,110 +332,127 @@ if info:
     print(f"Deployment: {info['deployment_type']}")
 ```
 
-## Advanced Usage
+### Multi-Process NUMA
 
-### Multi-Process NUMA (For Multi-NUMA Systems)
-
-For maximum throughput on multi-socket systems, use **one Python process per NUMA node** with process affinity pinning.
-
-**See [python/examples/benchmark_numa_multiprocess_v2.py](python/examples/benchmark_numa_multiprocess_v2.py) for complete implementation.**
-
-Key architecture:
-- One Python process per NUMA node
-- Process pinning via `os.sched_setaffinity()` to local cores
-- Local memory allocation on each NUMA node
-- Synchronized start with multiprocessing.Barrier
-
-**Results**:
-- C4-96 (48 cores, 2 NUMA nodes): 248.53 GB/s aggregate
-- C4-32 (16 cores, 1 NUMA node): 162.78 GB/s with 112% scaling efficiency
-
-### Chunk Size Optimization
-
-**Default chunk size is automatically optimized** for your system. You can override if needed:
+For maximum throughput on multi-socket systems, run **one Python process per NUMA node**
+pinned to local cores via `os.sched_setaffinity()`.
 
 ```python
-gen = dgen_py.Generator(
-    size=100 * 1024**3,
-    chunk_size=64 * 1024**2  # Override to 64 MB
-)
+gen = dgen_py.Generator(size=..., numa_mode="auto", numa_node=0)  # bind to node 0
 ```
 
-**Newer CPUs** (Emerald Rapid, Sapphire Rapids) with larger L3 cache benefit from 64 MB chunks.
+See [`python/examples/benchmark_numa_multiprocess_v2.py`](python/examples/benchmark_numa_multiprocess_v2.py)
+for the complete multi-process implementation.
 
-### Deduplication and Compression Ratios
+---
 
-**Performance vs Test Accuracy Tradeoff**:
+## Performance
 
-```python
-# FAST: Incompressible data (1.0x baseline)
-gen = dgen_py.Generator(
-    size=100 * 1024**3,
-    dedup_ratio=1.0,      # No dedup (no performance impact)
-    compress_ratio=1.0    # Incompressible data
-)
+### Streaming Comparison vs Common Alternatives
 
-# FASTER: More compressible (1.3-1.5x speedup)
-gen = dgen_py.Generator(
-    size=100 * 1024**3,
-    dedup_ratio=1.0,      # No dedup (no performance impact)
-    compress_ratio=2.0    # 2:1 compressible data
-)
-```
+See [Why dgen-py?](#why-dgen-py-because-it-destroys-numpy) above for the head-to-head NumPy comparison with full methodology.
 
-**Important**: Higher `compress_ratio` values improve generation performance (1.3-1.5x faster) BUT make the data more compressible, which may not represent your actual workload:
+### Per-Object and Streaming — 28-core Xeon (v0.2.4)
 
-- **compress_ratio=1.0**: Incompressible data (realistic for encrypted files, compressed archives)
-- **compress_ratio=2.0**: 2:1 compressible data (realistic for text, logs, uncompressed images)
-- **compress_ratio=3.0+**: Highly compressible data (may not be realistic)
+Run `cargo run --release --example speed-table` (Rust) or
+`python python/examples/bench_generation_speeds.py` (Python) to reproduce on your hardware.
 
-**Choose based on YOUR test requirements**, not performance numbers. If testing storage with compression enabled, use compress_ratio=1.0 to avoid inflating storage efficiency metrics.
+**Per-object:** tight loop, generation time only.
+- dgen-py ≤ 1 MB: `BufferPool.next_slice()` — zero-copy from pre-generated pool
+- dgen-py > 1 MB: `generate_data_simple()` — Rayon parallel per call
+- NumPy: `np.random.default_rng().integers(...)` — PCG64, single-threaded
 
-**Note**: `dedup_ratio` has zero performance impact (< 1% variance)
+**Streaming (dgen-py):** one `Generator` for the full run, 32 MB chunks, pool reused.
 
-### NUMA Modes
+| Object | Rust per-obj | dgen-py per-obj | NumPy per-obj | dgen-py stream |
+|--------|:---:|:---:|:---:|:---:|
+| 64 B   | 1.60 GB/s | 219 MB/s  | 9 MB/s    | ~67 GB/s |
+| 512 B  | 4.63 GB/s | 1.43 GB/s | 69 MB/s   | ~67 GB/s |
+| 4 KB   | 6.06 GB/s | 4.38 GB/s | 371 MB/s  | ~67 GB/s |
+| 64 KB  | 6.31 GB/s | 6.15 GB/s | 929 MB/s  | ~67 GB/s |
+| 1 MB   | 6.33 GB/s | 6.29 GB/s | 1.01 GB/s | ~67 GB/s |
+| 10 MB  | 9.47 GB/s | 6.75 GB/s | 948 MB/s  | ~67 GB/s |
+| 100 MB | 19.31 GB/s | 6.39 GB/s | 886 MB/s | ~74 GB/s |
+| 1 GB   | 24.83 GB/s | 16.15 GB/s | 891 MB/s | ~74 GB/s |
+| 10 GB  | **28.55 GB/s** | **18.29 GB/s** | 892 MB/s | **~74 GB/s** |
 
-```python
-# Auto-detect topology (recommended)
-gen = dgen_py.Generator(..., numa_mode="auto")
+**Key observations:**
 
-# Force UMA (single-socket)
-gen = dgen_py.Generator(..., numa_mode="uma")
+- **NumPy plateaus at ~900 MB/s** for objects ≥ 1 MB — PCG64 is single-threaded and saturates one core's DRAM write bandwidth; it has no streaming API and requires the full dataset in RAM.
+- **dgen-py and Rust scale to 18–29 GB/s** at 100 MB+ via all-core Rayon Xoshiro256++; at 10 GB they approach peak DRAM write bandwidth (~29 GB/s single-socket).
+- **Streaming hits 67–74 GB/s** by reusing the Rayon pool across 32 MB chunks; the working set stays in L3 and only the final writeback reaches DRAM.
+- **Only dgen-py** supports configurable `dedup_ratio` and `compress_ratio`. Other generators (`os.urandom`, NumPy, Numba) produce max-entropy data unsuitable for realistic storage workload testing.
 
-# Manual NUMA node binding (multi-process only)
-gen = dgen_py.Generator(..., numa_node=0)  # Bind to node 0
-```
+### Small-Object Pool Improvement — v0.2.3 (per-object, 1 GB total output)
+
+| Object size | v0.2.2 (`generate_data_simple`) | v0.2.3 `RollingPool` | Speedup |
+|:---:|:---:|:---:|:---:|
+| 64 KB | 107 MB/s  | 1.73 GB/s | **16×** |
+| 1 MB  | 1.78 GB/s | 1.74 GB/s | ≈1× |
+| 1 GB  | 9.73 GB/s | 9.49 GB/s | ≈1× |
+
+Zero regression for objects ≥ 1 MB; large-object bypass path is unaffected.
+
+### Multi-NUMA Scalability — GCP Emerald Rapid
+
+1,024 GB workload, `compress_ratio=1.0`:
+
+| Instance | Cores | NUMA Nodes | Aggregate | Per-Core | Scaling |
+|----------|:---:|:---:|:---:|:---:|:---:|
+| C4-8  | 4  | 1 | 36.26 GB/s  | 9.07 GB/s  | baseline |
+| C4-16 | 8  | 1 | **86.41 GB/s**  | **10.80 GB/s** | **119%** |
+| C4-32 | 16 | 1 | **162.78 GB/s** | **10.17 GB/s** | **112%** |
+| C4-96 | 48 | 2 | 248.53 GB/s | 5.18 GB/s  | 51%* |
+
+\* *NUMA penalty on multi-socket: 49% per-core reduction, but highest absolute throughput*
+
+- Excellent UMA scaling: 112–119% efficiency (super-linear due to larger aggregate L3 cache)
+- `compress_ratio=2.0` gives 1.3–1.5× generation speedup — choose based on workload realism, not speed
+
+**See [docs/BENCHMARK_RESULTS_V0.1.5.md](docs/BENCHMARK_RESULTS_V0.1.5.md) for detailed analysis.**
+
+---
+
+## Python Example Files
+
+| File | Category | Description |
+|------|----------|-------------|
+| [`Benchmark_dgen-py_FIXED.py`](python/examples/Benchmark_dgen-py_FIXED.py) | Benchmark | Streaming throughput: 32 MB vs 64 MB chunks, 100 GB × 3 runs |
+| [`bench_generation_speeds.py`](python/examples/bench_generation_speeds.py) | Benchmark | Comprehensive: fill_chunk, generate_buffer, create_bytearrays, file streaming |
+| [`test_small_object_v023.py`](python/examples/test_small_object_v023.py) | Test + Bench | BufferPool correctness checks + per-object speed vs NumPy |
+| [`test_set_seed_method.py`](python/examples/test_set_seed_method.py) | Test | `set_seed()` correctness and stream alternation |
+| [`test_seed_reproducibility.py`](python/examples/test_seed_reproducibility.py) | Test | `seed=` determinism across runs |
+| [`benchmark_numa_multiprocess_v2.py`](python/examples/benchmark_numa_multiprocess_v2.py) | Multi-NUMA | One-process-per-node architecture with `os.sched_setaffinity()` |
+| [`storage_benchmark.py`](python/examples/storage_benchmark.py) | Storage | End-to-end: generation → file / S3 write |
+
+---
 
 ## Architecture
 
-### Zero-Copy Implementation
+### Core Design
 
-**Python buffer protocol** with direct memory access:
-- No data copying between Rust and Python
-- GIL released during generation (true parallelism)
-- Memoryview creation < 0.001ms (verified zero-copy)
+- **1 MiB internal blocks** (`BLOCK_SIZE`): distributed across all cores via Rayon; tuned to L3 cache
+- **Xoshiro256++ RNG**: 5–10× faster than ChaCha20; independent per-block seeds for correct dedup and compression ratios
+- **Global `OnceLock<Arc<ThreadPool>>`**: created on first `DataGenerator::new()`, shared by all subsequent callers; no per-call pool overhead
+- **Zero-copy Python buffer protocol**: GIL released during generation (true parallelism); memoryview creation < 0.001 ms
 
-### Parallel Generation
+### NUMA Architecture
 
-- **4 MiB internal blocks** distributed across all cores
-- Thread pool created once, reused for all operations
-- Xoshiro256++ RNG (5-10x faster than ChaCha20)
-- Optimal for L3 cache performance
+One Python process per NUMA node; each process allocates memory locally and pins to local cores.
+The PyPI wheel omits hwloc for broad compatibility; source builds enable full topology detection
+via [hwlocality](https://crates.io/crates/hwlocality).
 
-### NUMA Optimization
-
-- Multi-process architecture (one process per NUMA node)
-- Local memory allocation on each node
-- Local core affinity (no cross-node traffic)
-- Automatic topology detection via hwloc
+---
 
 ## Use Cases
 
-- **Storage benchmarking**: Generate realistic test data at 40-188 GB/s
-- **Network testing**: High-throughput data sources
-- **AI/ML profiling**: Simulate data loading pipelines
-- **Compression testing**: Validate compressor behavior with controlled ratios
-- **Deduplication testing**: Test dedup systems with known ratios
+- **Storage benchmarking**: generate realistic dedup/compress workloads at 40–248 GB/s
+- **AI/ML data loading**: simulate DLIO, NPZ, and checkpoint read pipelines
+- **Network testing**: high-throughput data sources with constant memory footprint
+- **Compression/dedup validation**: exact control over data compressibility and dedup ratio
+- **Reproducible CI/CD**: identical workloads across test runs via `seed=`
+
+---
 
 ## License
 
@@ -690,5 +461,6 @@ Dual-licensed under MIT OR Apache-2.0
 ## Credits
 
 - Built with [PyO3](https://pyo3.rs/) and [Maturin](https://www.maturin.rs/)
-- Uses [hwlocality](https://crates.io/crates/hwlocality) for NUMA topology detection
-- Xoshiro256++ RNG from [rand](https://crates.io/crates/rand) crate
+- NUMA topology via [hwlocality](https://crates.io/crates/hwlocality)
+- Xoshiro256++ from the [rand](https://crates.io/crates/rand) crate
+

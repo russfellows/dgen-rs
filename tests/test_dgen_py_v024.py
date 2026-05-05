@@ -3,9 +3,11 @@
 tests/test_dgen_py_v024.py
 
 Verify dgen-py v0.2.4 library routines work correctly.
-Tests: generate_buffer(), BufferPool, Generator, XorStream.fill(), XorStream.generate()
-Zero-copy: memoryview(), numpy.frombuffer()
-Threading: multiple threads sharing one XorStream
+Tests: generate_buffer(), BufferPool, Generator streaming, throughput, concurrency.
+
+v0.2.4 changes tested here:
+  - Global Rayon pool (OnceLock) shared across all Generator instances
+  - Parallel generation is the sole dedup-safe mode (XorStream removed)
 """
 
 import sys
@@ -107,61 +109,79 @@ print(f"  {written/1e6:.0f} MB in {elapsed:.3f}s = {gbps:.2f} GB/s")
 print("  PASS")
 
 # ---------------------------------------------------------------------------
-# 5. XorStream.fill() — in-place zero-copy
+# 5. generate_buffer uniqueness — dedup safety of Parallel generator
 # ---------------------------------------------------------------------------
-banner("5. XorStream.fill() — in-place generation")
+banner("5. generate_buffer() uniqueness (dedup-safe, Parallel generator)")
 
-stream = dgen.XorStream()
-buf_x = bytearray(SIZE_8M)
-stream.fill(buf_x)
+N_BUFS = 8
+bufs = [dgen.generate_buffer(SIZE_1M) for _ in range(N_BUFS)]
+arrs = [np.frombuffer(memoryview(b), dtype=np.uint8) for b in bufs]
 
-arr_x = np.frombuffer(buf_x, dtype=np.uint8)
-print(f"  non-zero bytes: {np.count_nonzero(arr_x)}")
-assert np.count_nonzero(arr_x) > 0, "fill() produced all zeros!"
+all_unique = True
+for i in range(len(arrs)):
+    for j in range(i + 1, len(arrs)):
+        diff = int(np.sum(arrs[i] != arrs[j]))
+        if diff == 0:
+            print(f"  ERROR: buffers {i} and {j} are identical!")
+            all_unique = False
 
-buf_x2 = bytearray(SIZE_8M)
-stream.fill(buf_x2)
-arr_x2 = np.frombuffer(buf_x2, dtype=np.uint8)
-arr_x1_fresh = np.frombuffer(buf_x, dtype=np.uint8)
-diff_x = int(np.sum(arr_x1_fresh != arr_x2))
-print(f"  bytes differing between two fills: {diff_x} (expect > 0)  ✓")
-assert diff_x > 0, "Two fills produced identical data!"
-
-print(f"  objects_generated : {stream.objects_generated}")
-assert stream.objects_generated == 2
+print(f"  {N_BUFS} buffers, all pairwise unique: {all_unique}  ✓")
+assert all_unique, "generate_buffer() produced duplicate buffers!"
 print("  PASS")
 
 # ---------------------------------------------------------------------------
-# 6. XorStream.generate() — BytesView zero-copy
+# 6. Global pool — multiple generators share pool, produce unique output
 # ---------------------------------------------------------------------------
-banner("6. XorStream.generate() — BytesView zero-copy")
+banner("6. Global pool — N concurrent Generators, each unique output")
 
-stream2 = dgen.XorStream()
-data_g = stream2.generate(SIZE_8M)
-print(f"  type : {type(data_g)}")
-assert len(data_g) == SIZE_8M
+N_THREADS = 8
+THREAD_ITERS = 16
+results_data = [None] * N_THREADS
+errors = []
 
-view_g = memoryview(data_g)
-arr_g = np.frombuffer(view_g, dtype=np.uint8)
-assert arr_g.shape == (SIZE_8M,)
-print(f"  numpy shape : {arr_g.shape}  ✓")
+def worker_gen(tid: int) -> None:
+    try:
+        local_buf = bytearray(SIZE_1M)
+        gen = dgen.Generator(size=SIZE_1M * THREAD_ITERS, dedup_ratio=1, compress_ratio=1)
+        fills = 0
+        while not gen.is_complete():
+            n = gen.fill_chunk(local_buf)
+            if n == 0:
+                break
+            fills += 1
+        results_data[tid] = fills
+    except Exception as exc:
+        errors.append((tid, exc))
 
-print(f"  objects_generated : {stream2.objects_generated}")
-assert stream2.objects_generated == 1
+threads = [threading.Thread(target=worker_gen, args=(i,)) for i in range(N_THREADS)]
+t0 = time.perf_counter()
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+elapsed = time.perf_counter() - t0
+
+if errors:
+    print(f"  ERRORS: {errors}")
+    sys.exit(1)
+
+total_fills = sum(results_data)
+total_bytes = total_fills * SIZE_1M
+gbps = total_bytes / elapsed / 1e9
+print(f"  {N_THREADS} threads, {total_fills} fills, {total_bytes/1e6:.0f} MB in {elapsed:.3f}s = {gbps:.2f} GB/s")
+assert all(r == THREAD_ITERS for r in results_data), f"Unexpected fill counts: {results_data}"
 print("  PASS")
 
 # ---------------------------------------------------------------------------
-# 7. XorStream throughput
+# 7. generate_buffer() throughput benchmark
 # ---------------------------------------------------------------------------
-banner("7. XorStream.fill() throughput benchmark")
+banner("7. generate_buffer() throughput (single-threaded)")
 
-stream3 = dgen.XorStream()
-buf3 = bytearray(SIZE_8M)
 ITERS = 64
-
+buf7 = None
 t0 = time.perf_counter()
 for _ in range(ITERS):
-    stream3.fill(buf3)
+    buf7 = dgen.generate_buffer(SIZE_8M)
 elapsed = time.perf_counter() - t0
 
 total_bytes = ITERS * SIZE_8M
@@ -170,46 +190,9 @@ print(f"  {total_bytes/1e6:.0f} MB in {elapsed:.3f}s = {gbps:.2f} GB/s")
 print("  PASS")
 
 # ---------------------------------------------------------------------------
-# 8. Threading — multiple threads sharing one XorStream
+# 8. BufferPool.next_slice()
 # ---------------------------------------------------------------------------
-banner("8. Multi-thread safety of XorStream (shared instance)")
-
-N_THREADS = 8
-THREAD_ITERS = 32
-stream_shared = dgen.XorStream()
-results = [None] * N_THREADS
-errors = []
-
-def worker(tid: int) -> None:
-    try:
-        local_buf = bytearray(SIZE_1M)
-        for _ in range(THREAD_ITERS):
-            stream_shared.fill(local_buf)
-        results[tid] = True
-    except Exception as exc:
-        errors.append((tid, exc))
-
-threads = [threading.Thread(target=worker, args=(i,)) for i in range(N_THREADS)]
-for t in threads:
-    t.start()
-for t in threads:
-    t.join()
-
-if errors:
-    print(f"  ERRORS: {errors}")
-    sys.exit(1)
-
-assert all(r is True for r in results), f"Some threads failed: {results}"
-total_fills = N_THREADS * THREAD_ITERS
-print(f"  {N_THREADS} threads × {THREAD_ITERS} fills = {total_fills} total fills  ✓")
-print(f"  objects_generated : {stream_shared.objects_generated}")
-assert stream_shared.objects_generated == total_fills
-print("  PASS")
-
-# ---------------------------------------------------------------------------
-# 9. BufferPool.next_slice()
-# ---------------------------------------------------------------------------
-banner("9. BufferPool.next_slice() — rolling zero-copy pool")
+banner("8. BufferPool.next_slice() — rolling zero-copy pool")
 
 pool = dgen.BufferPool(dedup_ratio=1, compress_ratio=1)
 slices = [pool.next_slice(SIZE_1M) for _ in range(8)]

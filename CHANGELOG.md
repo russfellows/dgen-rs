@@ -6,48 +6,40 @@ All notable changes to dgen-rs/dgen-py will be documented in this file.
 
 ### Added
 
-#### `xor_stream` module — `UniqueXorStream`: fast, dedup-safe data generation without Rayon
+#### Process-global Rayon pool with auto-sizing and sibling-process detection
 
-New public module `dgen_data::xor_stream` exposing `UniqueXorStream`, a thread-safe data
-generator that produces unique, dedup-safe byte streams at ~15 GB/s per core without
-spawning any Rayon threads.
+`DataGenerator` previously created a new `rayon::ThreadPool` on every call to
+`DataGenerator::new()`.  At high concurrency (c=28, c=32) this produced N×T OS threads
+simultaneously — 784 threads at c=28 on a 28-core machine — causing a throughput cliff.
 
-**Design**: A 1 MiB base buffer is filled with Xoshiro256++ output at construction time.
-Each `fill()` call increments an `AtomicU64` counter, derives a unique Xoshiro256++ seed
-via splitmix64, generates a keystream, and XORs it against the cyclic 1 MiB base to
-produce the output.  The result is unique per call but requires zero synchronisation
-beyond a single 64-bit atomic increment — no mutex, no allocation beyond the output
-buffer.
+**Fix**: A `static GLOBAL_POOL: OnceLock<Arc<rayon::ThreadPool>>` is initialised once on
+the first `DataGenerator::new()` call and reused by all subsequent callers in the same
+process.  N concurrent callers share **one** pool; OS thread count stays bounded.
 
-```rust
-use dgen_data::UniqueXorStream;
+**Auto-sizing** (no user configuration required) — priority order:
 
-let stream = UniqueXorStream::new();    // 1 MiB base buffer generated once
-let mut buf = vec![0u8; 8 * 1024 * 1024];
+1. `DGEN_THREADS` env var (explicit override)
+2. `RAYON_NUM_THREADS` env var
+3. `cpu_affinity ÷ live_sibling_dgen_processes` — reads `/proc/<pid>/` to count other
+   `dgen-data` processes on the same machine, divides affinity CPUs evenly between them
+4. Total logical CPUs (fallback)
 
-// Each call produces a different, dedup-safe 8 MiB payload
-stream.fill(&mut buf);
-stream.fill(&mut buf);   // completely different bytes
-```
+Sibling tracking uses PID files in `/tmp/dgen-<uid>/`.  Each process registers its PID
+on first use; a background thread removes the file on process exit.
 
-**Dedup safety**: No two 512-byte blocks across any two `fill()` calls share a
-fingerprint — validated by a 100,000-block collision test in the unit suite (5 tests,
-all pass).
+**Benchmark** (28-core Xeon, 8 MiB objects, 5 s runs):
 
-**Thread safety**: `UniqueXorStream` is `Sync`; multiple threads may call `fill()` on
-the same instance concurrently.  The `AtomicU64` counter guarantees each call receives a
-unique seed regardless of interleaving.
+| Concurrency | Before (new pool/call) | After (global pool) |
+|:-----------:|:----------------------:|:-------------------:|
+| c=1         | ~5 GB/s                | ~5 GB/s             |
+| c=16        | ~52 GB/s               | ~52 GB/s            |
+| c=28        | ~45 GB/s (cliff)       | **~58 GB/s** (+29%) |
 
-**Constants**: `dgen_data::xor_stream::XOR_BASE_SIZE = 1024 * 1024` (1 MiB base).
+#### `thread_local` module — canonical thread-local pool API for async servers
 
-**When to use**: Prefer `UniqueXorStream` over the Rayon-based `generate_data()` path
-when generating large objects at high concurrency (≥ 32 concurrent writers).  At those
-concurrency levels, Rayon's global pool delivers the same throughput per object, but
-`UniqueXorStream` avoids all thread scheduling overhead and scales linearly.
-
-#### `thread_local` module — Canonical thread-local pool API for async servers
-
-New public module `dgen_data::thread_local` that canonicalises the `thread_local! { RefCell<RollingPool> }` pattern required by every async HTTP server that needs fake GET data.
+New public module `dgen_data::thread_local` that canonicalises the
+`thread_local! { RefCell<RollingPool> }` pattern required by every async HTTP server
+that needs fake GET data.
 
 Before (boilerplate in every project):
 ```rust
@@ -68,13 +60,13 @@ fn get_bytes(size: usize) -> bytes::Bytes { next_slice(size) }
 ```
 
 Public functions:
-- `next_slice(size) -> Bytes` — zero-copy for `size ≤ BLOCK_SIZE`, fresh Rayon generation for larger
+- `next_slice(size) -> Bytes` — zero-copy for `size ≤ BLOCK_SIZE`, fresh generation for larger
 - `reconfigure(dedup, compress)` — change data characteristics; no-op if unchanged
 - `remaining() -> usize` — bytes left in current buffer before next refill (diagnostics)
 
-**Send-safety**: The `RefCell` borrow is acquired and released within a single synchronous expression before any `.await` point, so futures that call `next_slice` are `Send` and work correctly on Tokio's multi-thread runtime.
-
-**Continuity guarantee**: The rolling pointer advances continuously across all requests on a thread. Consecutive GETs naturally receive distinct byte ranges without any re-seeding.
+**Send-safety**: The `RefCell` borrow is acquired and released within a single
+synchronous expression before any `.await` point, so futures that call `next_slice` are
+`Send` and work correctly on Tokio's multi-thread runtime.
 
 #### `BLOCK_SIZE` re-exported at crate root
 
@@ -85,37 +77,31 @@ Previously it was only accessible as `dgen_data::constants::BLOCK_SIZE`.
 use dgen_data::BLOCK_SIZE;  // now works
 ```
 
-This allows callers to write compile-time assertions and chunk-size comparisons without
-importing the constants module:
-
-```rust
-const CHUNK: usize = 256 * 1024;
-const _: () = assert!(CHUNK <= dgen_data::BLOCK_SIZE);
-```
-
 ### Fixed
 
-#### `generate_data()` — Rayon global pool (no per-call thread pool creation)
+#### `get_affinity_cpu_count` — removed incorrect `#[cfg(feature = "numa")]` guard
 
-`generate_data()` in `src/generator.rs` previously called
-`rayon::ThreadPoolBuilder::new().num_threads(N).build()` on **every invocation**, spinning
-up N OS threads and tearing them down after generating a single object.  At high
-concurrency (c=32, c=64) this created hundreds of simultaneous OS thread
-create/destroy cycles, collapsing throughput by ~24%.
+`get_affinity_cpu_count()` and `parse_cpu_list()` read `/proc/self/status` to count
+CPU-affinity bits — they require no hwlocality crate and work on any Linux build.
+They were previously gated by `#[cfg(feature = "numa")]`, which caused a compile error
+on default (non-NUMA) builds when `compute_pool_size()` called them unconditionally.
+The cfg guard is removed; the functions are now always compiled.
 
-**Fix**: The non-NUMA path now calls `par_chunks_mut().enumerate().for_each()` directly
-on the data slice.  Rayon dispatches work to its **global** thread pool, which is
-constructed once at first use and reused for the lifetime of the process.  The NUMA-aware
-path (feature `thread-pinning`) is unchanged — it still builds a topology-pinned custom
-pool.
+### Removed
 
-**Impact**: With the global pool, sai3-bench `fresh` mode throughput at c=32 improved
-from ~1,040 MiB/s to ~1,987 MiB/s (8 MiB objects, loopback, loki-russ 28-core Xeon).
-The previous −24% concurrency cliff is eliminated.
+#### `xor_stream` module / `UniqueXorStream`
+
+`UniqueXorStream` (XOR-keystream-based generator, ~15 GB/s per core) was developed
+for v0.2.4 but superseded by the global Rayon pool fix, which delivers equivalent
+aggregate throughput at high concurrency without a separate code path.  The module
+is removed to keep the API surface minimal.
+
+The Python `XorStream` class and `bench_xor_vs_parallel.py` example are also removed.
+`generate_buffer()`, `Generator`, and `BufferPool` remain the recommended Python APIs.
 
 ---
 
-## [0.2.3] - 2026-04-15
+
 
 ### Added
 

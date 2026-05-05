@@ -21,7 +21,6 @@ try:
     from ._dgen_rs import (
         BytesView,
         BufferPool,
-        XorStream,
         generate_buffer,
         generate_into_buffer,
         Generator,
@@ -47,7 +46,6 @@ except ImportError as e:
 __all__ = [
     "BytesView",
     "BufferPool",
-    "XorStream",
     "generate_buffer",
     "generate_data",
     "generate_into_buffer",

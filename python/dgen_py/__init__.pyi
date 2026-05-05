@@ -7,7 +7,7 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 class BytesView:
-    """Zero-copy buffer returned by generate_buffer() / XorStream.generate().
+    """Zero-copy buffer returned by generate_buffer() and similar functions.
 
     Supports the Python buffer protocol — use memoryview() for zero-copy
     access, or bytes() to copy to a Python bytes object.
@@ -70,59 +70,6 @@ class BufferPool:
 
     @property
     def compress_ratio(self) -> int: ...
-
-# ---------------------------------------------------------------------------
-# XorStream — fast, dedup-safe generation without Rayon (new in v0.2.4)
-# ---------------------------------------------------------------------------
-
-class XorStream:
-    """Fast, dedup-safe data generator using XOR keystream (new in v0.2.4).
-
-    Holds a 1 MiB random base buffer and an atomic counter.  Each fill() or
-    generate() call produces a unique output — no two calls share a 512-byte
-    fingerprint.  Thread-safe: &self methods, no mutex required.
-
-    Performance: ~15 GB/s per core.  No Rayon, no per-call allocation on the
-    fill() path.
-
-    Example::
-
-        import dgen_py
-        stream = dgen_py.XorStream()
-
-        # Fastest: fill pre-allocated bytearray in-place
-        buf = bytearray(8 * 1024 * 1024)
-        stream.fill(buf)            # object 0
-        stream.fill(buf)            # object 1 — different bytes, guaranteed
-
-        # Convenience: allocate + fill in one call
-        data = stream.generate(8 * 1024 * 1024)
-        view = memoryview(data)     # zero-copy
-    """
-
-    def __init__(self) -> None: ...
-
-    def fill(self, buffer: object) -> None:
-        """Fill a pre-allocated writable buffer with unique, dedup-safe data.
-
-        GIL is released during generation.
-
-        Args:
-            buffer: bytearray, memoryview, numpy uint8 array, etc.
-
-        Raises:
-            ValueError: if buffer is read-only or not C-contiguous.
-        """
-        ...
-
-    def generate(self, size: int) -> BytesView:
-        """Allocate a new BytesView of size bytes, filled with unique data."""
-        ...
-
-    @property
-    def objects_generated(self) -> int:
-        """Total fill() + generate() calls on this instance."""
-        ...
 
 # ---------------------------------------------------------------------------
 # Streaming generator

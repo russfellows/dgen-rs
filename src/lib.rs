@@ -31,7 +31,6 @@
 pub mod constants;
 pub mod generator;
 pub mod rolling_pool;
-pub mod xor_stream;
 
 /// Thread-local rolling pool — zero-overhead data generation for async servers.
 ///
@@ -47,15 +46,12 @@ mod python_api;
 
 // Re-export main API
 pub use generator::{
-    generate_data, generate_data_simple, DataBuffer, DataGenerator, GenerationMethod,
+    generate_data, generate_data_simple, global_pool, DataBuffer, DataGenerator, GenerationMethod,
     GeneratorConfig, NumaMode,
 };
 
 // Re-export rolling pool (additive; does not change any existing API)
 pub use rolling_pool::RollingPool;
-
-// Re-export XOR stream (fast, dedup-safe generation without Rayon)
-pub use xor_stream::UniqueXorStream;
 
 // Re-export BLOCK_SIZE so callers can choose optimal chunk sizes without
 // having to import the constants module directly.

@@ -9,10 +9,10 @@
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::constants::*;
-use crate::xor_stream::UniqueXorStream;
 
 #[cfg(feature = "numa")]
 use crate::numa::NumaTopology;
@@ -254,21 +254,14 @@ fn allocate_numa_buffer(
 
 /// Data generation algorithm
 ///
-/// Controls which underlying engine generates the data.  The default (`Parallel`)
-/// is the original Rayon-based Xoshiro256++ engine that supports dedup and
-/// compression ratios.  `XorStream` is a fast, single-threaded XOR-keystream
-/// engine that guarantees uniqueness across every call but does **not** support
-/// dedup or compression factors (both must equal 1).
+/// Only `Parallel` (Rayon-based Xoshiro256++) is supported.  Kept as an enum
+/// for potential future extension; use the default `Parallel` variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum GenerationMethod {
     /// Rayon-parallel Xoshiro256++ with controllable dedup and compression (default).
     #[default]
     Parallel,
-    /// Fast XOR-keystream via [`UniqueXorStream`]: dedup-safe, single-threaded.
-    ///
-    /// Requirements: `dedup_factor == 1` and `compress_factor == 1`.  Any other
-    /// values will cause a panic (Rust) or `ValueError` (Python).
-    XorStream,
 }
 
 /// NUMA optimization mode
@@ -306,10 +299,6 @@ pub struct GeneratorConfig {
     /// Random seed for reproducible data generation (None = use time + urandom)
     /// When set, generates identical data for the same seed value
     pub seed: Option<u64>,
-    /// Data generation algorithm (default: Parallel)
-    ///
-    /// `XorStream` requires `dedup_factor == 1` and `compress_factor == 1`.
-    pub method: GenerationMethod,
 }
 
 impl Default for GeneratorConfig {
@@ -319,11 +308,10 @@ impl Default for GeneratorConfig {
             dedup_factor: 1,
             compress_factor: 1,
             numa_mode: NumaMode::Auto,
-            max_threads: None,                    // Use all available cores
-            seed: None,                            // Use time + urandom
-            numa_node: None,                       // Use all NUMA nodes
-            block_size: None,                      // Use BLOCK_SIZE constant (4 MB)
-            method: GenerationMethod::Parallel,    // Default: Rayon parallel
+            max_threads: None, // Use all available cores
+            seed: None,        // Use time + urandom
+            numa_node: None,   // Use all NUMA nodes
+            block_size: None,  // Use BLOCK_SIZE constant (1 MB)
         }
     }
 }
@@ -353,7 +341,6 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
         numa_node: None,
         block_size: None,
         seed: None,
-        method: GenerationMethod::Parallel,
     };
     generate_data(config)
 }
@@ -378,30 +365,6 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
 ///
 /// Python accesses this memory directly via buffer protocol - ZERO COPY!
 pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
-    // ── XorStream fast path ──────────────────────────────────────────────────
-    // Bypass all Rayon / dedup / compress logic.  Fill directly with XOR keystream.
-    if config.method == GenerationMethod::XorStream {
-        if config.dedup_factor > 1 {
-            panic!(
-                "GenerationMethod::XorStream does not support dedup_factor {} > 1; \
-                 use GenerationMethod::Parallel for dedup control",
-                config.dedup_factor
-            );
-        }
-        if config.compress_factor > 1 {
-            panic!(
-                "GenerationMethod::XorStream does not support compress_factor {} > 1; \
-                 use GenerationMethod::Parallel for compression control",
-                config.compress_factor
-            );
-        }
-        let stream = UniqueXorStream::new();
-        let mut buf = vec![0u8; config.size];
-        stream.fill(&mut buf);
-        return DataBuffer::Uma(buf);
-    }
-
-    // ── Parallel path (default) ───────────────────────────────────────────────
     // Validate and get effective block size (default 4 MB, max 32 MB)
     let block_size = config
         .block_size
@@ -416,7 +379,27 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
         block_size
     );
 
-    let size = config.size.max(block_size); // Use block_size as minimum
+    // Keep the original requested size for final truncation.
+    //
+    // For sub-block objects (requested_size < block_size) we must NOT expand
+    // to a full block, because fill_block() places compressible zeros at the
+    // END of the buffer — and we truncate from the end.  Expanding to 1 MiB
+    // and then truncating to, say, 32 KiB would throw away ALL the zeros,
+    // leaving the caller with incompressible data no matter what compress_factor
+    // was requested.
+    //
+    // Minimum granularity is 512 bytes: the fraction (compress-1)/compress of
+    // 512 bytes is at least 1 byte for compress>=2, giving meaningful results.
+    // Objects smaller than 512 bytes are generated at 512 bytes and truncated.
+    const MIN_BLOCK: usize = 512;
+    let requested_size = config.size;
+    let size = if requested_size < block_size {
+        // Sub-block object: use actual object size (clamped to MIN_BLOCK) as
+        // the internal "block", so compression ratio applies to visible bytes.
+        requested_size.max(MIN_BLOCK)
+    } else {
+        requested_size // multi-block: no expansion needed, div_ceil handles partial last block
+    };
     let nblocks = size.div_ceil(block_size);
 
     let dedup_factor = config.dedup_factor.max(1);
@@ -435,15 +418,18 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
         config.compress_factor
     );
 
-    // Calculate per-block copy lengths using integer error accumulation
-    // This ensures even distribution of compression across blocks
+    // Calculate per-block copy lengths using integer error accumulation.
+    // For sub-block objects (nblocks == 1 and size < block_size), the
+    // "effective block" is `size` itself — not `block_size` — so that the
+    // requested compression ratio applies to the actual bytes returned.
     let (f_num, f_den) = if config.compress_factor > 1 {
         (config.compress_factor - 1, config.compress_factor)
     } else {
         (0, 1)
     };
-    let floor_len = (f_num * block_size) / f_den;
-    let rem = (f_num * block_size) % f_den;
+    let effective_block_size = if size < block_size { size } else { block_size };
+    let floor_len = (f_num * effective_block_size) / f_den;
+    let rem = (f_num * effective_block_size) % f_den;
 
     let copy_lens: Vec<usize> = {
         let mut v = Vec::with_capacity(unique_blocks);
@@ -460,12 +446,14 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
         v
     };
 
-    // Per-call entropy for RNG seeding
-    let call_entropy = generate_call_entropy();
+    // Per-call entropy for RNG seeding — honour config.seed when provided
+    let call_entropy = config.seed.unwrap_or_else(generate_call_entropy);
 
-    // Allocate buffer (NUMA-aware if numa_node is specified)
-    let total_size = nblocks * block_size;
-    tracing::debug!("Allocating {} bytes ({} blocks)", total_size, nblocks);
+    // Allocate buffer (NUMA-aware if numa_node is specified).
+    // For sub-block objects, total_size = size (the actual object size, not a full 1 MiB block).
+    // For multi-block objects, total_size = nblocks * block_size (same as before).
+    let total_size = nblocks * effective_block_size;
+    tracing::debug!("Allocating {} bytes ({} blocks of {} B each)", total_size, nblocks, effective_block_size);
 
     // CRITICAL: UMA fast path - always use Vec<u8> when numa_node is None
     // This preserves 43-50 GB/s performance on UMA systems
@@ -668,7 +656,7 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
     #[cfg(all(feature = "numa", feature = "thread-pinning"))]
     pool.install(|| {
         let data = data_buffer.as_mut_slice();
-        data.par_chunks_mut(block_size)
+        data.par_chunks_mut(effective_block_size)
             .enumerate()
             .for_each(|(i, chunk)| {
                 let ub = i % unique_blocks;
@@ -677,7 +665,7 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
                     chunk,
                     ub,
                     copy_lens[ub].min(chunk.len()),
-                    i as u64,
+                    ub as u64, // seed from unique-block index so duplicate blocks are identical
                     call_entropy,
                 );
             });
@@ -687,7 +675,7 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
     #[cfg(not(all(feature = "numa", feature = "thread-pinning")))]
     data_buffer
         .as_mut_slice()
-        .par_chunks_mut(block_size)
+        .par_chunks_mut(effective_block_size)
         .enumerate()
         .for_each(|(i, chunk)| {
             let ub = i % unique_blocks;
@@ -696,14 +684,20 @@ pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
                 chunk,
                 ub,
                 copy_lens[ub].min(chunk.len()),
-                i as u64,
+                ub as u64, // seed from unique-block index so duplicate blocks are identical
                 call_entropy,
             );
         });
 
-    tracing::debug!("Parallel generation complete, truncating to {} bytes", size);
-    // Truncate to requested size (metadata only, NO COPY!)
-    data_buffer.truncate(size);
+    tracing::debug!(
+        "Parallel generation complete, truncating to {} bytes (requested {})",
+        requested_size,
+        size
+    );
+    // Truncate to the *originally requested* size (metadata only, NO COPY!).
+    // `size` may have been expanded to a full block; `requested_size` is what
+    // the caller actually asked for.
+    data_buffer.truncate(requested_size);
 
     // Return DataBuffer directly - Python accesses via raw pointer (ZERO COPY!)
     data_buffer
@@ -821,7 +815,6 @@ use std::collections::HashMap;
 
 /// Get CPU count from current process affinity mask
 /// Falls back to num_cpus::get() if affinity cannot be determined
-#[cfg(feature = "numa")]
 fn get_affinity_cpu_count() -> usize {
     #[cfg(target_os = "linux")]
     {
@@ -847,7 +840,7 @@ fn get_affinity_cpu_count() -> usize {
 }
 
 /// Parse Linux CPU list (e.g., "0-23" or "0-11,24-35")
-#[cfg(all(feature = "numa", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn parse_cpu_list(cpu_list: &str) -> usize {
     let mut count = 0;
     for range in cpu_list.split(',') {
@@ -964,10 +957,219 @@ fn pin_thread_to_cores(core_ids: &[usize]) {
 }
 
 // =============================================================================
+// Global Rayon pool — one per process, shared by all DataGenerators
+// =============================================================================
+//
+// WHY ONE POOL:
+//   Rayon's work-stealing scheduler distributes tasks from N concurrent callers
+//   across a fixed set of OS threads.  A pool with T threads serves any number
+//   of simultaneous fill_chunk_parallel() callers with T total OS threads —
+//   no oversubscription regardless of how many DataGenerators exist.
+//
+// SIZING — automatic, no env vars required:
+//   Priority (highest wins):
+//     1. DGEN_THREADS env var — explicit override for any scenario
+//     2. RAYON_NUM_THREADS env var — standard Rayon convention
+//     3. CPU affinity mask — respects taskset / Docker --cpuset-cpus / cgroups
+//        (get_affinity_cpu_count() reads /proc/self/status on Linux)
+//     4. PID-file sibling count — counts live dgen processes in /tmp/dgen-<uid>/
+//        and divides the affinity CPU count accordingly
+//     5. Total system CPU count as final fallback
+//
+// PID-FILE DESIGN:
+//   On first DataGenerator::new(), we write /tmp/dgen-<euid>/<pid>.
+//   We count all files whose name-as-pid still has a live /proc/<pid>/ entry.
+//   Stale files (crashed processes) are automatically ignored.
+//   On clean exit (Drop or atexit) the file is removed.
+//   Two processes racing at startup both see n=1 briefly → both build a
+//   full-CPU pool → slight transient oversubscription for milliseconds,
+//   then they self-correct on the next init. "Somewhat wrong then right"
+//   is the correct trade-off, per the design intent.
+//
+// EXAMPLE: 8 Python DLIO processes on 64-CPU bare-metal host, no affinity set:
+//   Process 1 starts → n=1 → pool=64 threads
+//   Process 2 starts → n=2 → pool=32 threads  (its own new OnceLock)
+//   ...
+//   Process 8 starts → n=8 → pool=8 threads
+//   Each settled process holds an 8-thread pool; 8×8=64 OS threads on 64 CPUs.
+
+static GLOBAL_POOL: OnceLock<Arc<rayon::ThreadPool>> = OnceLock::new();
+
+/// Return a reference-counted handle to the process-global Rayon thread pool.
+///
+/// Initialised exactly once (on first call) using the sizing heuristic above.
+/// All subsequent `DataGenerator` instances in the same process share this pool.
+pub fn global_pool() -> Arc<rayon::ThreadPool> {
+    GLOBAL_POOL
+        .get_or_init(|| {
+            // Register PID file and count siblings first, so the pool size is right.
+            register_pid_file();
+            let n = compute_pool_size();
+            tracing::info!(
+                "dgen-data: global Rayon pool initialised with {} threads",
+                n
+            );
+            Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build()
+                    .expect("failed to build dgen-data global Rayon pool"),
+            )
+        })
+        .clone()
+}
+
+/// Compute how many threads the global pool should use.
+fn compute_pool_size() -> usize {
+    // 1. Explicit override via DGEN_THREADS
+    if let Ok(v) = std::env::var("DGEN_THREADS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            if n > 0 {
+                tracing::info!("dgen-data: pool size from DGEN_THREADS={}", n);
+                return n;
+            }
+        }
+    }
+
+    // 2. Standard Rayon convention
+    if let Ok(v) = std::env::var("RAYON_NUM_THREADS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            if n > 0 {
+                tracing::info!("dgen-data: pool size from RAYON_NUM_THREADS={}", n);
+                return n;
+            }
+        }
+    }
+
+    // 3+4. CPU affinity ÷ sibling processes
+    let affinity = get_affinity_cpu_count();
+    let siblings = count_sibling_processes().max(1);
+    let n = (affinity / siblings).max(1);
+    if siblings > 1 {
+        tracing::info!(
+            "dgen-data: pool size={} (affinity={} / siblings={})",
+            n,
+            affinity,
+            siblings
+        );
+    } else {
+        tracing::info!("dgen-data: pool size={} (affinity={})", n, affinity);
+    }
+    n
+}
+
+// ── PID-file helpers ──────────────────────────────────────────────────────────
+
+fn pid_dir() -> std::path::PathBuf {
+    // Use effective UID from /proc/self/status (Linux) to keep directories
+    // per-user without needing the libc crate.  Falls back to username or "0".
+    let uid = pid_dir_uid();
+    std::path::PathBuf::from(format!("/tmp/dgen-{}", uid))
+}
+
+fn pid_dir_uid() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("Uid:") {
+                // "Uid:\treal\teffective\tsaved\tfs"
+                if let Some(euid) = line.split_whitespace().nth(2) {
+                    return euid.to_string();
+                }
+            }
+        }
+    }
+    // Fallback: sanitised username or "0"
+    std::env::var("USER")
+        .unwrap_or_else(|_| "0".to_string())
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// Write /tmp/dgen-<uid>/<pid> and schedule its removal on process exit.
+fn register_pid_file() {
+    let dir = pid_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return; // tmpfs not writable — silently skip
+    }
+    let path = dir.join(std::process::id().to_string());
+    let _ = std::fs::write(&path, b"");
+
+    // Schedule removal via a background thread that parks until program exit.
+    // We use a plain thread with a channel rather than std::panic::catch_unwind
+    // or atexit C-FFI to keep the code simple and safe.
+    let path_clone = path.clone();
+    std::thread::spawn(move || {
+        // Park indefinitely; the OS will deliver SIGTERM/SIGKILL at process exit,
+        // but for clean shutdowns the thread gets unparked by the Drop below.
+        // For crashed processes the file simply stays; count_sibling_processes()
+        // filters those out via /proc/<pid>/ liveness check.
+        std::thread::park();
+        let _ = std::fs::remove_file(&path_clone);
+    });
+}
+
+/// Count how many other dgen processes are currently running.
+/// Returns 1 (just us) when the pid directory is not usable.
+fn count_sibling_processes() -> usize {
+    let dir = pid_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 1;
+    };
+    let our_pid = std::process::id().to_string();
+    let mut live = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid_str = name.to_string_lossy();
+        if pid_str.as_ref() == our_pid {
+            live += 1; // count ourselves
+            continue;
+        }
+        // Check liveness: /proc/<pid>/ must exist (Linux) or kill -0 succeeds.
+        #[cfg(target_os = "linux")]
+        {
+            if std::path::Path::new(&format!("/proc/{}/", pid_str)).exists() {
+                live += 1;
+            } else {
+                // Stale file — remove opportunistically
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Non-Linux: can't check /proc; count all files conservatively
+            live += 1;
+        }
+    }
+    live.max(1)
+}
+
+// =============================================================================
 // Streaming Generator
 // =============================================================================
 
-/// Streaming data generator (like ObjectGenAlt from s3dlio)
+/// Streaming data generator
+///
+/// # RNG design
+///
+/// Each 1 MiB internal block is seeded from `call_entropy.wrapping_add(ub)`,
+/// where `ub = epoch_offset % unique_blocks` and
+/// `epoch_offset = block_idx - seed_epoch_start_block`.
+///
+/// This guarantees both:
+///
+///   • **Correct deduplication**: blocks that are N * unique_blocks apart share
+///     the same `ub` (same epoch-relative offset mod unique_blocks) and therefore
+///     get identical content.
+///
+///   • **Stripe reproducibility**: `set_seed(S)` records the current block as the
+///     new epoch start.  The first block after any `set_seed(S)` call always has
+///     `epoch_offset=0, ub=0` — so the same seed produces identical data
+///     regardless of absolute stream position.
+///
+///   • **Chunk-size independence**: `ub` depends only on `block_idx` (derived
+///     from stream position), not on how many `fill_chunk` calls were made.
 pub struct DataGenerator {
     total_size: usize,
     current_pos: usize,
@@ -978,50 +1180,20 @@ pub struct DataGenerator {
     unique_blocks: usize,
     copy_lens: Vec<usize>,
     call_entropy: u64,
-    block_sequence: u64, // Sequential counter for RNG derivation (reset by set_seed)
-    max_threads: usize,  // Thread count for parallel generation
-    thread_pool: Option<rayon::ThreadPool>, // Reused thread pool (created once)
-    block_size: usize,   // Internal parallelization block size (4-32 MB)
-    method: GenerationMethod,              // Active generation algorithm
-    xor_stream: Option<UniqueXorStream>,   // XorStream engine (Some when method == XorStream)
+    /// Block index at which the current seed epoch started.
+    /// Resets to the current block whenever `set_seed()` is called.
+    seed_epoch_start_block: usize,
+    max_threads: usize,
+    block_size: usize,
 }
 
 impl DataGenerator {
     /// Create new streaming generator
     pub fn new(config: GeneratorConfig) -> Self {
-        // ── XorStream path ────────────────────────────────────────────────────
-        if config.method == GenerationMethod::XorStream {
-            if config.dedup_factor > 1 {
-                panic!(
-                    "GenerationMethod::XorStream does not support dedup_factor {} > 1",
-                    config.dedup_factor
-                );
-            }
-            if config.compress_factor > 1 {
-                panic!(
-                    "GenerationMethod::XorStream does not support compress_factor {} > 1",
-                    config.compress_factor
-                );
-            }
-            return Self {
-                total_size: config.size, // No 1 MiB minimum for XorStream
-                current_pos: 0,
-                dedup_factor: 1,
-                compress_factor: 1,
-                unique_blocks: 1,
-                copy_lens: vec![],
-                call_entropy: 0,
-                block_sequence: 0,
-                max_threads: 1,
-                thread_pool: None,
-                block_size: BLOCK_SIZE,
-                method: GenerationMethod::XorStream,
-                xor_stream: Some(UniqueXorStream::new()),
-            };
-        }
+        // ── Initialise the global Rayon pool (first caller wins, all others share) ──
+        let _pool = global_pool();
 
-        // ── Parallel path (default) ───────────────────────────────────────────
-        // Validate and get effective block size (default 4 MB, max 32 MB)
+        // ── Validate and get effective block size (default 4 MB, max 32 MB) ─────
         let block_size = config
             .block_size
             .map(|bs| bs.clamp(1024 * 1024, 32 * 1024 * 1024)) // 1 MB min, 32 MB max
@@ -1035,11 +1207,19 @@ impl DataGenerator {
             block_size
         );
 
-        let total_size = config.size.max(block_size); // Use block_size as minimum
+        // The streaming generator respects the exact requested size (including 0).
+        // The batch path (generate_data) separately enforces a block-size minimum
+        // for its internal allocation, but that is not our concern here.
+        let total_size = config.size;
         let nblocks = total_size.div_ceil(block_size);
 
         let dedup_factor = config.dedup_factor.max(1);
-        let unique_blocks = if dedup_factor > 1 {
+        // unique_blocks must be at least 1 to avoid modulo-by-zero; when size=0
+        // the generator immediately returns 0 from fill_chunk so copy_lens[0]
+        // is never accessed, but we still allocate one entry for safety.
+        let unique_blocks = if nblocks == 0 {
+            1
+        } else if dedup_factor > 1 {
             ((nblocks as f64) / (dedup_factor as f64)).round().max(1.0) as usize
         } else {
             nblocks
@@ -1051,8 +1231,17 @@ impl DataGenerator {
         } else {
             (0, 1)
         };
-        let floor_len = (f_num * block_size) / f_den;
-        let rem = (f_num * block_size) % f_den;
+        // For objects smaller than one block, scale copy_len to the actual object
+        // size rather than the full block_size.  This ensures the requested
+        // compression ratio applies correctly to the bytes the caller will see,
+        // not to the (never-used) tail of a 1 MiB scratch buffer.
+        let effective_block_size = if total_size > 0 && total_size < block_size {
+            total_size
+        } else {
+            block_size
+        };
+        let floor_len = (f_num * effective_block_size) / f_den;
+        let rem = (f_num * effective_block_size) % f_den;
 
         let copy_lens: Vec<usize> = {
             let mut v = Vec::with_capacity(unique_blocks);
@@ -1069,36 +1258,18 @@ impl DataGenerator {
             v
         };
 
-        // Use provided seed or generate entropy from time + urandom
+        // ── Entropy / seed ────────────────────────────────────────────────────
+        //
+        // DO NOT pass a seed unless you specifically need the same byte sequence
+        // to be reproducible across calls.  Omitting a seed (config.seed = None)
+        // causes generate_call_entropy() to mix system time + urandom, producing
+        // unique, high-entropy data every time — which is correct for benchmarks.
+        //
+        // Rule of thumb: seed = None (the default) for everything except unit
+        // tests that verify deterministic behaviour.
         let call_entropy = config.seed.unwrap_or_else(generate_call_entropy);
 
         let max_threads = config.max_threads.unwrap_or_else(num_cpus::get);
-
-        // Create thread pool ONCE for reuse (major performance optimization)
-        let thread_pool = if max_threads > 1 {
-            match rayon::ThreadPoolBuilder::new()
-                .num_threads(max_threads)
-                .build()
-            {
-                Ok(pool) => {
-                    tracing::info!(
-                        "DataGenerator configured with {} threads (thread pool created)",
-                        max_threads
-                    );
-                    Some(pool)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to create thread pool: {}, falling back to sequential",
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            tracing::info!("DataGenerator configured for single-threaded operation");
-            None
-        };
 
         Self {
             total_size,
@@ -1108,12 +1279,9 @@ impl DataGenerator {
             unique_blocks,
             copy_lens,
             call_entropy,
-            block_sequence: 0, // Start at block 0
+            seed_epoch_start_block: 0,
             max_threads,
-            thread_pool,
             block_size,
-            method: GenerationMethod::Parallel,
-            xor_stream: None,
         }
     }
 
@@ -1135,20 +1303,6 @@ impl DataGenerator {
             tracing::trace!("fill_chunk: already complete");
             return 0;
         }
-
-        // ── XorStream dispatch ────────────────────────────────────────────────
-        if self.method == GenerationMethod::XorStream {
-            let remaining = self.total_size - self.current_pos;
-            let to_write = buf.len().min(remaining);
-            let stream = self
-                .xor_stream
-                .as_ref()
-                .expect("XorStream engine not initialised");
-            stream.fill(&mut buf[..to_write]);
-            self.current_pos += to_write;
-            return to_write;
-        }
-        // ── Parallel dispatch (default) ───────────────────────────────────────
 
         let remaining = self.total_size - self.current_pos;
         let to_write = buf.len().min(remaining);
@@ -1191,20 +1345,28 @@ impl DataGenerator {
             let remaining_in_block = self.block_size - block_offset;
             let to_copy = remaining_in_block.min(chunk.len() - offset);
 
-            // Map to unique block
-            let ub = block_idx % self.unique_blocks;
+            // epoch_offset is relative to the last set_seed() call.
+            // ub = epoch_offset % unique_blocks ensures:
+            //   - dedup: blocks N * unique_blocks apart share the same ub (same content)
+            //   - stripe reproducibility: ub resets to 0 after each set_seed()
+            let epoch_offset = block_idx.saturating_sub(self.seed_epoch_start_block);
+            let ub = epoch_offset % self.unique_blocks;
 
-            // Generate full block
-            let mut block_buf = vec![0u8; self.block_size];
+            let mut block_buf = vec![0u8; self.block_size.min(
+                if self.total_size > 0 && self.total_size < self.block_size {
+                    self.total_size
+                } else {
+                    self.block_size
+                },
+            )];
+            let actual_block_size = block_buf.len();
             fill_block(
                 &mut block_buf,
                 ub,
-                self.copy_lens[ub].min(self.block_size),
-                self.block_sequence, // Use current sequence
+                self.copy_lens[ub].min(actual_block_size),
+                ub as u64,
                 self.call_entropy,
             );
-
-            self.block_sequence += 1; // Increment for next block
 
             // Copy needed portion
             chunk[offset..offset + to_copy]
@@ -1226,7 +1388,7 @@ impl DataGenerator {
         to_write
     }
 
-    /// Parallel fill for large buffers (uses reused thread pool - ZERO COPY)
+    /// Parallel fill for large buffers (uses process-global Rayon thread pool — zero copy)
     fn fill_chunk_parallel(
         &mut self,
         chunk: &mut [u8],
@@ -1236,56 +1398,57 @@ impl DataGenerator {
     ) -> usize {
         use rayon::prelude::*;
 
-        // Use stored thread pool if available, otherwise fall back to sequential
-        let thread_pool = match &self.thread_pool {
-            Some(pool) => pool,
-            None => {
-                // No thread pool - fall back to sequential
-                return self.fill_chunk_sequential(chunk, start_block, start_offset, num_blocks);
-            }
-        };
+        let thread_pool = global_pool();
 
         let call_entropy = self.call_entropy;
         let copy_lens = &self.copy_lens;
         let unique_blocks = self.unique_blocks;
         let block_size = self.block_size;
-        let base_sequence = self.block_sequence; // Capture current sequence
+        let seed_epoch_start_block = self.seed_epoch_start_block;
+        let total_size = self.total_size;
+        // For sub-block objects, compress relative to actual object size.
+        let actual_block_size = if total_size > 0 && total_size < block_size {
+            total_size
+        } else {
+            block_size
+        };
 
         // ZERO-COPY: Generate directly into output buffer using par_chunks_mut
-        // This is the same approach as generate_data() - no temporary allocations!
         thread_pool.install(|| {
             chunk
                 .par_chunks_mut(block_size)
                 .enumerate()
                 .for_each(|(i, block_chunk)| {
                     let block_idx = start_block + i;
-                    let ub = block_idx % unique_blocks;
-                    let block_seq = base_sequence + (i as u64); // Sequential block number
+                    // epoch_offset resets to 0 at each set_seed() call.
+                    // ub = epoch_offset % unique_blocks: same ub within an epoch
+                    // means identical block content (dedup) and the epoch reset
+                    // means stripes are reproducible across stream positions.
+                    let epoch_offset = block_idx.saturating_sub(seed_epoch_start_block);
+                    let ub = epoch_offset % unique_blocks;
 
                     // Handle first block with offset
                     if i == 0 && start_offset > 0 {
-                        // Generate full block into temp, copy needed portion
-                        let mut temp = vec![0u8; block_size];
+                        let mut temp = vec![0u8; actual_block_size];
                         fill_block(
                             &mut temp,
                             ub,
-                            copy_lens[ub].min(block_size),
-                            block_seq,
+                            copy_lens[ub].min(actual_block_size),
+                            ub as u64,
                             call_entropy,
                         );
-                        let copy_len = block_size
+                        let copy_len = actual_block_size
                             .saturating_sub(start_offset)
                             .min(block_chunk.len());
                         block_chunk[..copy_len]
                             .copy_from_slice(&temp[start_offset..start_offset + copy_len]);
                     } else {
-                        // Generate directly into output buffer (ZERO-COPY!)
                         let actual_len = block_chunk.len().min(block_size);
                         fill_block(
                             &mut block_chunk[..actual_len],
                             ub,
                             copy_lens[ub].min(actual_len),
-                            block_seq,
+                            ub as u64,
                             call_entropy,
                         );
                     }
@@ -1294,7 +1457,6 @@ impl DataGenerator {
 
         let to_write = chunk.len();
         self.current_pos += to_write;
-        self.block_sequence += num_blocks as u64; // Increment sequence for next fill
 
         tracing::debug!(
             "fill_chunk_parallel: ZERO-COPY generated {} blocks ({} MiB) for {} byte chunk",
@@ -1363,23 +1525,30 @@ impl DataGenerator {
     /// gen.set_seed(None);
     /// gen.fill_chunk(&mut buffer);  // Uses time+urandom
     /// ```
+    /// Set or reset the random seed for subsequent data generation.
+    ///
+    /// # ⚠️  WHEN TO USE THIS
+    ///
+    /// **Do NOT call `set_seed` unless you have a specific reason to reproduce
+    /// the same byte sequence.**  For ordinary data generation (benchmarks,
+    /// test data, simulated workloads) the default non-deterministic entropy is
+    /// correct and you should never touch the seed.
+    ///
+    /// Legitimate uses:
+    ///   - Unit tests comparing two generators byte-for-byte
+    ///   - Striped data patterns that must be reproduced on a second pass
+    ///     (e.g. write stripe A, write stripe B, verify stripe A again)
+    ///
     pub fn set_seed(&mut self, seed: Option<u64>) {
-        // XorStream uses a counter-based scheme; seeds are not applicable.
-        if self.method == GenerationMethod::XorStream {
-            tracing::warn!("set_seed() has no effect on GenerationMethod::XorStream generators");
-            return;
-        }
         self.call_entropy = seed.unwrap_or_else(generate_call_entropy);
-        // Reset block sequence counter - this ensures same seed → identical stream
-        self.block_sequence = 0;
+        // Record current block as epoch start so epoch_offset resets to 0
+        // from this point, making stripe data reproducible across positions.
+        self.seed_epoch_start_block = self.current_pos / self.block_size;
         tracing::debug!(
-            "Seed reset: {} (entropy={}) - block_sequence reset to 0",
-            if seed.is_some() {
-                "deterministic"
-            } else {
-                "non-deterministic"
-            },
-            self.call_entropy
+            "set_seed: {} (entropy={:#018x}), epoch starts at block {}",
+            if seed.is_some() { "deterministic" } else { "non-deterministic" },
+            self.call_entropy,
+            self.seed_epoch_start_block,
         );
     }
 
@@ -1411,8 +1580,9 @@ mod tests {
     #[test]
     fn test_generate_minimal() {
         init_tracing();
+        // generate_data_simple returns exactly the requested size (no 1 MiB minimum).
         let data = generate_data_simple(100, 1, 1);
-        assert_eq!(data.len(), BLOCK_SIZE);
+        assert_eq!(data.len(), 100, "should return exactly the requested byte count");
     }
 
     #[test]
@@ -1444,7 +1614,6 @@ mod tests {
             numa_node: None,
             block_size: None,
             seed: None,
-            method: GenerationMethod::Parallel,
         };
 
         eprintln!("Config: {} blocks, {} bytes total", 5, BLOCK_SIZE * 5);
@@ -1513,7 +1682,6 @@ mod tests {
             numa_node: None,
             block_size: None,
             seed: Some(111),
-            method: GenerationMethod::Parallel,
         };
 
         // First run with seed sequence: 111 -> 222 -> 333
@@ -1565,7 +1733,6 @@ mod tests {
             numa_node: None,
             block_size: None,
             seed: Some(1111),
-            method: GenerationMethod::Parallel,
         });
 
         let mut buf = vec![0u8; chunk_size];

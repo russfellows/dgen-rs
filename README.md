@@ -6,7 +6,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
-[![Tests](https://img.shields.io/badge/tests-6%20passing-success)](https://github.com/russfellows/dgen-rs)
+[![Tests](https://img.shields.io/badge/tests-69%20passing-success)](https://github.com/russfellows/dgen-rs)
 
 ## Features
 

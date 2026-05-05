@@ -4,52 +4,84 @@
 
 //! Fast, dedup-safe data generation via XOR keystream.
 //!
-//! # Design
+//! # Design  (matches MinIO warp `rngfix`)
 //!
-//! [`UniqueXorStream`] holds a 1 MiB base buffer filled once with high-entropy
-//! random data.  For each [`fill()`](UniqueXorStream::fill) call it:
+//! [`UniqueXorStream`] maintains a **16 KiB source buffer** that is filled once
+//! at construction with high-entropy random data and then never modified.
+//! 16 KiB fits entirely in L1 cache (typical L1 = 32 KiB per core), so
+//! source reads are effectively free.
 //!
-//! 1. Atomically increments a global counter to obtain a unique `object_id`.
-//! 2. Derives a per-call Xoshiro256++ seed from `object_id` via splitmix64
-//!    (one pass of a high-avalanche hash so that sequential IDs produce
-//!    completely different RNG states).
-//! 3. Generates a keystream from that Xoshiro256++ instance.
-//! 4. XORs the keystream with the cycling 1 MiB base buffer into the output.
+//! The logical output is an infinite pseudorandom byte stream.  Each [`fill`]
+//! call atomically claims the next `buf.len()` bytes from that stream.
 //!
-//! # Dedup safety
+//! ## Key derivation  (per 16 KiB block)
 //!
-//! - **Inter-object**: every call gets a unique `object_id` → unique seed →
-//!   unique keystream → every output byte differs.
-//! - **Intra-object**: Xoshiro256++ advances its state between every 8-byte
-//!   word, so consecutive 512-byte blocks within the same object also differ.
-//! - **Fingerprint safety**: any content-fingerprint deduplication scheme
-//!   (SHA-256/MD5 of 512 B / 4 KiB blocks) will see zero matches across any
-//!   two `fill()` calls.  Delta-dedup systems that compare raw byte streams
-//!   *could* detect the XOR relationship in theory, but no production storage
-//!   product does block-level delta analysis.
+//! The stream is divided into **16 KiB blocks**.  For block `n`:
 //!
-//! # Performance
+//! ```text
+//! base_mix = xxh3_scalar(n) XOR (n × 11400714785074694791)
+//! keys[i]  = base_mix XOR subxor[i]          i = 0..3
+//! ```
 //!
-//! Xoshiro256++ generates ~15–20 GB/s per core.  For an 8 MiB object that is
-//! roughly 0.4–0.5 ms — with no allocations, no Rayon, and no thread
-//! synchronisation beyond a single `AtomicU64::fetch_add`.
+//! `subxor[0..3]` are four secret 64-bit values generated at construction.
+//! This is a direct port of warp's key schedule (`scrambleU64` + `subxor` mix).
+//!
+//! ## Inner loop  (32 bytes per iteration)
+//!
+//! Within a block, output bytes are generated as:
+//! ```text
+//! out[p] = base[p] XOR keys[(p / 8) % 4]
+//! ```
+//! The 32-byte key cycle aligns with AVX2 registers.  With the source buffer
+//! L1-hot and the output going to DRAM, the bottleneck is **DRAM write
+//! bandwidth** — identical to warp's behaviour.
+//!
+//! ## Why this is fast
+//!
+//! | Factor         | Old design (Xoshiro)    | New design (warp-style)          |
+//! |----------------|-------------------------|----------------------------------|
+//! | Ops per byte   | ~0.75 (Xoshiro per 8 B) | ~0.00006 (12 ops per 16 KiB)     |
+//! | Source reads   | 1 MiB (spills L2)       | 16 KiB (stays in L1)             |
+//! | Expected GB/s  | ~2 GB/s single core     | ~8–15 GB/s single core           |
+//!
+//! ## Dedup safety
+//!
+//! The byte-offset counter advances monotonically, so no two `fill()` calls
+//! ever produce the same range from the stream.  Content-fingerprint dedup
+//! (SHA-256 / MD5 of 512 B or larger blocks) sees zero collisions between
+//! any two calls.
+//!
+//! ## Thread safety
+//!
+//! `fill()` takes `&self`.  The byte offset is claimed via `AtomicU64`.
+//! Key derivation is purely deterministic — no shared mutable state.
 
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 1 MiB base buffer size.  Fits in L2 cache on CPUs with ≥1 MiB per-core L2.
-/// Divisible by 8 (2^20 / 2^3 = 2^17), so the 8-byte word loop never straddles
-/// the end of the base buffer.
-pub const XOR_BASE_SIZE: usize = 1024 * 1024;
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Fast, dedup-safe data generator.
+/// Log₂ of the source buffer size (14 → 16 KiB).
+const BUFFER_LOG: u32 = 14;
+
+/// Source buffer size: 16 KiB.  Fits in L1 cache.
+pub const XOR_BASE_SIZE: usize = 1 << BUFFER_LOG;
+
+/// Bitwise mask to wrap a byte offset into the source buffer.
+const BUFFER_MASK: usize = XOR_BASE_SIZE - 1;
+
+/// Large prime used in warp's block-key mixing.
+const BLOCK_PRIME: u64 = 11_400_714_785_074_694_791;
+
+// ── Public struct ─────────────────────────────────────────────────────────────
+
+/// Fast, dedup-safe, low-CPU data generator.
 ///
-/// Intended as a **process-level singleton** shared across all threads.
-/// Thread-safe: the base buffer is immutable after construction; the counter
-/// uses `AtomicU64` with `Relaxed` ordering (uniqueness, not causality, is
-/// required).
+/// Intended as a **process-level singleton** shared across threads.
+/// Thread-safe: the base buffer and subxor keys are immutable after
+/// construction; state is limited to two `AtomicU64` counters.
 ///
 /// # Example
 ///
@@ -59,92 +91,76 @@ pub const XOR_BASE_SIZE: usize = 1024 * 1024;
 /// let stream = UniqueXorStream::new();
 /// let mut buf = vec![0u8; 8 * 1024 * 1024];
 /// stream.fill(&mut buf);   // first object
-/// stream.fill(&mut buf);   // second object — different bytes, guaranteed
+/// stream.fill(&mut buf);   // second object — guaranteed different bytes
 /// ```
 pub struct UniqueXorStream {
-    /// 1 MiB of truly random data, read-only after construction.
-    base: Box<[u8]>,
-    /// Global object counter.  Monotonically increasing; each `fill()` call
-    /// consumes one ID.  Wrapping on overflow is fine — 2^64 objects is
-    /// effectively unreachable in practice.
-    counter: AtomicU64,
+    /// 16 KiB of immutable random data.  Always hot in L1 cache.
+    base: Box<[u8; XOR_BASE_SIZE]>,
+    /// Four secret 64-bit values generated at construction, mixed into every
+    /// block's key schedule.  Makes the stream unique per process start.
+    subxor: [u64; 4],
+    /// Monotonically increasing byte offset into the logical infinite stream.
+    /// Each `fill()` call advances this by `buf.len()`.  Never reset.
+    offset: AtomicU64,
+    /// Number of `fill()` calls made so far.  Used by `objects_generated()`.
+    call_count: AtomicU64,
 }
 
-// SAFETY: `base` is never written after construction (shared read-only).
-// `counter` is `AtomicU64` which is inherently `Sync + Send`.
+// SAFETY: `base` and `subxor` are never written after construction.
+// `offset` and `call_count` are `AtomicU64` which are inherently `Sync + Send`.
 unsafe impl Sync for UniqueXorStream {}
 unsafe impl Send for UniqueXorStream {}
 
 impl UniqueXorStream {
     /// Create a new `UniqueXorStream`.
     ///
-    /// Fills the 1 MiB base buffer with Xoshiro256++ output seeded from the
-    /// system clock plus `getrandom` entropy, so each process start (and each
-    /// explicit construction) gets a distinct base.
+    /// Fills the 16 KiB base buffer and generates 4 secret `subxor` keys
+    /// using a Xoshiro256++ RNG seeded from the system clock and OS entropy.
     pub fn new() -> Self {
         let seed = entropy_seed();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-        let mut base = vec![0u8; XOR_BASE_SIZE];
-        rng.fill_bytes(&mut base);
+
+        // Initialise the 16 KiB base buffer.
+        let mut base = Box::new([0u8; XOR_BASE_SIZE]);
+        rng.fill_bytes(base.as_mut_slice());
+
+        // Generate 4 secret mixing keys.
+        let subxor = [
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ];
+
         Self {
-            base: base.into_boxed_slice(),
-            counter: AtomicU64::new(0),
+            base,
+            subxor,
+            offset: AtomicU64::new(0),
+            call_count: AtomicU64::new(0),
         }
     }
 
-    /// Fill `buf` with unique, dedup-safe data.
+    /// Fill `buf` with unique, dedup-safe pseudorandom bytes.
     ///
-    /// Thread-safe and lock-free.  Each call is guaranteed to produce output
-    /// that does not share any 512-byte (or larger) block fingerprint with any
-    /// other call, regardless of which thread calls it.
-    ///
-    /// `buf` may be any size.  Objects larger than the 1 MiB base have the base
-    /// tiled (cycled) through the output; uniqueness still holds because the
-    /// XOR keystream advances independently of the base cycle.
+    /// Atomically claims the next `buf.len()` bytes of the infinite stream.
+    /// No reseeding, no per-call allocations.  Thread-safe.
     pub fn fill(&self, buf: &mut [u8]) {
-        let object_id = self.counter.fetch_add(1, Ordering::Relaxed);
-        // splitmix64: maps sequential IDs to uncorrelated 64-bit values.
-        // This ensures that IDs 0, 1, 2, … produce completely different
-        // Xoshiro256++ states (without it, consecutive seeds produce similar
-        // initial outputs).
-        let seed = splitmix64(object_id);
-        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-
-        let base = &*self.base;
-        // XOR_BASE_SIZE is 2^20; i*8 is always a multiple of 8; so
-        // (i*8) % XOR_BASE_SIZE is always a multiple of 8 and never within 7
-        // bytes of the end.  The slice [base_off..base_off+8] is always valid.
-        let base_len = base.len(); // == XOR_BASE_SIZE
-
-        let chunks = buf.len() / 8;
-        for i in 0..chunks {
-            let key = rng.next_u64();
-            let base_off = (i * 8) % base_len;
-            // SAFETY: base_off is a multiple of 8, base_len is a multiple of 8,
-            // so base_off + 8 <= base_len always holds.
-            let base_word =
-                u64::from_le_bytes(base[base_off..base_off + 8].try_into().unwrap());
-            let out = key ^ base_word;
-            buf[i * 8..i * 8 + 8].copy_from_slice(&out.to_le_bytes());
-        }
-
-        // Handle trailing 1–7 bytes (only occurs for non-8-byte-aligned sizes).
-        let rem_start = chunks * 8;
-        if rem_start < buf.len() {
-            let key = rng.next_u64();
-            let key_bytes = key.to_le_bytes();
-            let base_off = rem_start % base_len;
-            for j in 0..(buf.len() - rem_start) {
-                buf[rem_start + j] = base[base_off + j] ^ key_bytes[j];
-            }
-        }
+        let start = self.offset.fetch_add(buf.len() as u64, Ordering::Relaxed);
+        self.call_count.fetch_add(1, Ordering::Relaxed);
+        xor_fill(&self.base, &self.subxor, start, buf);
     }
 
-    /// Return the number of objects generated so far.
+    /// Number of `fill()` calls made so far.
     ///
-    /// Intended for diagnostics / logging only.
+    /// Equivalent to the number of "objects" generated when each `fill()` call
+    /// corresponds to one object.  Thread-safe diagnostic counter.
     pub fn objects_generated(&self) -> u64 {
-        self.counter.load(Ordering::Relaxed)
+        self.call_count.load(Ordering::Relaxed)
+    }
+
+    /// Total bytes generated so far (sum of all `buf.len()` arguments to `fill()`).
+    pub fn bytes_generated(&self) -> u64 {
+        self.offset.load(Ordering::Relaxed)
     }
 }
 
@@ -154,21 +170,141 @@ impl Default for UniqueXorStream {
     }
 }
 
-// ── Private helpers ──────────────────────────────────────────────────────────
+// ── Core fill logic ───────────────────────────────────────────────────────────
 
-/// splitmix64 finalizer — converts a sequential counter into a well-distributed
-/// 64-bit value suitable for use as a Xoshiro seed.
+/// Fill `out` starting at `stream_offset` in the logical stream.
 ///
-/// Reference: https://prng.di.unimi.it/splitmix64.c
-#[inline(always)]
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e3779b97f4a7c15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
-    x ^ (x >> 31)
+/// Processes the output in at-most-16-KiB blocks, deriving 4 keys per block
+/// and applying them via `xor_chunk`.  This is the warp `rngfix` algorithm.
+#[inline]
+pub(crate) fn xor_fill(
+    base: &[u8; XOR_BASE_SIZE],
+    subxor: &[u64; 4],
+    stream_offset: u64,
+    out: &mut [u8],
+) {
+    let mut remaining = out;
+    let mut offset = stream_offset;
+
+    while !remaining.is_empty() {
+        let within_block = (offset as usize) & BUFFER_MASK;
+        let bytes_this_block = (XOR_BASE_SIZE - within_block).min(remaining.len());
+
+        let (chunk, rest) = remaining.split_at_mut(bytes_this_block);
+
+        // Derive 4 keys for this 16 KiB block — computed only once per block.
+        let block_n = offset >> BUFFER_LOG;
+        let keys = derive_keys(block_n, subxor);
+
+        xor_chunk(base, within_block, chunk, &keys);
+
+        offset += bytes_this_block as u64;
+        remaining = rest;
+    }
 }
 
-/// Generate a seed from wall-clock time XOR'd with OS entropy.
+/// Derive 4 XOR keys for block `block_n`.
+///
+/// Direct port of warp's `Read()` key schedule:
+/// `keys[i] = scrambleU64(blockN) ^ subxor[i] ^ (blockN × BLOCK_PRIME)`
+#[inline(always)]
+fn derive_keys(block_n: u64, subxor: &[u64; 4]) -> [u64; 4] {
+    let mix = scramble_u64(block_n) ^ block_n.wrapping_mul(BLOCK_PRIME);
+    [
+        mix ^ subxor[0],
+        mix ^ subxor[1],
+        mix ^ subxor[2],
+        mix ^ subxor[3],
+    ]
+}
+
+/// XOR `base[base_start..]` into `out` using a 32-byte key cycle.
+///
+/// Precondition: `base_start + out.len() <= XOR_BASE_SIZE`.
+///
+/// The key for base position `p` is `keys[(p / 8) % 4]` — the same mapping
+/// as warp's `xorSlice` SSE2 assembly: a 32-byte key pattern repeating over
+/// the 16 KiB base buffer.
+///
+/// Implementation strategy for autovectorisation:
+/// 1. Take `src = &base[base_start..base_start+n]` — a sub-slice whose length
+///    LLVM knows is `n`.  Both `src[i+j]` and `out[i+j]` are then provably
+///    in-bounds when `i+32 <= n` and `j < 32`, so all bounds checks are
+///    elided in the hot loop.
+/// 2. Byte-by-byte head until the base position is 32-byte aligned.
+/// 3. Full 32-byte chunks — fixed inner loop over j=0..32 with
+///    `out[i+j] = src[i+j] ^ cycle[j]`.  LLVM widens this to VPXOR ymm
+///    (AVX2) or PXOR xmm (SSE2) automatically.
+/// 4. Byte-by-byte tail.
+#[inline]
+fn xor_chunk(
+    base: &[u8; XOR_BASE_SIZE],
+    base_start: usize,
+    out: &mut [u8],
+    keys: &[u64; 4],
+) {
+    debug_assert!(base_start + out.len() <= XOR_BASE_SIZE);
+
+    let n = out.len();
+    // Sub-slice: LLVM now knows src.len() == n.
+    // Accesses src[i+j] with i+32<=n and j<32 are provably in-bounds → no checks.
+    let src = &base[base_start..base_start + n];
+
+    // Expand 4 keys → 32-byte key cycle.
+    let cycle: [u8; 32] = {
+        let mut c = [0u8; 32];
+        c[0..8].copy_from_slice(&keys[0].to_le_bytes());
+        c[8..16].copy_from_slice(&keys[1].to_le_bytes());
+        c[16..24].copy_from_slice(&keys[2].to_le_bytes());
+        c[24..32].copy_from_slice(&keys[3].to_le_bytes());
+        c
+    };
+
+    let mut i = 0usize;
+
+    // ── Head: bytes until `base_start + i` reaches the next 32-byte boundary ─
+    let head = ((32 - (base_start & 31)) & 31).min(n);
+    while i < head {
+        out[i] = src[i] ^ cycle[(base_start + i) & 31];
+        i += 1;
+    }
+
+    // ── Hot path: full 32-byte chunks ────────────────────────────────────────
+    // After the head, (base_start + i) % 32 == 0, so cycle[j] is the correct
+    // key byte for base position base_start+i+j.  All three arrays have
+    // bound == n (out, src) or 32 (cycle), and LLVM can prove every access is
+    // in-bounds from the loop conditions → autovectorises to PXOR/VPXOR.
+    while i + 32 <= n {
+        for j in 0..32 {
+            out[i + j] = src[i + j] ^ cycle[j];
+        }
+        i += 32;
+    }
+
+    // ── Tail: remaining 0–31 bytes ────────────────────────────────────────────
+    while i < n {
+        out[i] = src[i] ^ cycle[(base_start + i) & 31];
+        i += 1;
+    }
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// xxh3 scalar finaliser for a single 64-bit value.
+///
+/// Direct port of warp's `scrambleU64()`.  Maps a sequential block number to
+/// a well-distributed 64-bit value in ~12 arithmetic operations.
+#[inline(always)]
+fn scramble_u64(v: u64) -> u64 {
+    let mut h = v ^ (0x1cad21f72c81017c_u64 ^ 0xdb979083e96dd4de_u64);
+    h = h.rotate_left(49) ^ h.rotate_left(24);
+    h = h.wrapping_mul(0x9fb21c651e98df25);
+    h ^= (h >> 35).wrapping_add(8);
+    h = h.wrapping_mul(0x9fb21c651e98df25);
+    h ^ (h >> 28)
+}
+
+/// Seed from wall-clock nanoseconds XOR'd with OS entropy via `rand::rng()`.
 fn entropy_seed() -> u64 {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -178,7 +314,7 @@ fn entropy_seed() -> u64 {
     time.wrapping_add(rng.next_u64())
 }
 
-// ── Unit tests ───────────────────────────────────────────────────────────────
+// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -196,7 +332,7 @@ mod tests {
 
     #[test]
     fn two_streams_produce_different_bytes() {
-        // Two independent instances each get different base buffers.
+        // Two independent instances each get different base buffers and subxor keys.
         let s1 = UniqueXorStream::new();
         let s2 = UniqueXorStream::new();
         let mut a = vec![0u8; 64 * 1024];
@@ -208,7 +344,7 @@ mod tests {
 
     #[test]
     fn no_512b_block_collision() {
-        // Verify that no 512-byte block in object A matches any block in object B.
+        // No 512-byte block in object A should match any block in object B.
         let stream = UniqueXorStream::new();
         let mut a = vec![0u8; 4 * 1024 * 1024];
         let mut b = vec![0u8; 4 * 1024 * 1024];
@@ -254,6 +390,63 @@ mod tests {
         let zeros = buf.iter().filter(|&&b| b == 0).count();
         let ratio = zeros as f64 / buf.len() as f64;
         // Random data should have ~0.39% zeros; allow up to 2% for statistical slack.
-        assert!(ratio < 0.02, "zero byte ratio {:.2}% too high — data may not be random", ratio * 100.0);
+        assert!(
+            ratio < 0.02,
+            "zero byte ratio {:.2}% too high — data may not be random",
+            ratio * 100.0
+        );
+    }
+
+    #[test]
+    fn objects_generated_counts_calls() {
+        let stream = UniqueXorStream::new();
+        assert_eq!(stream.objects_generated(), 0);
+        let mut buf = vec![0u8; 1024];
+        stream.fill(&mut buf);
+        assert_eq!(stream.objects_generated(), 1);
+        stream.fill(&mut buf);
+        assert_eq!(stream.objects_generated(), 2);
+    }
+
+    #[test]
+    fn xor_chunk_correctness() {
+        // Verify that xor_chunk produces the expected XOR of base and key.
+        let mut base = Box::new([0u8; XOR_BASE_SIZE]);
+        for (i, b) in base.iter_mut().enumerate() {
+            *b = (i & 0xff) as u8;
+        }
+        let keys = [0x0102030405060708u64, 0u64, 0u64, 0u64];
+        let mut out = vec![0u8; 8];
+        xor_chunk(&base, 0, &mut out, &keys);
+        // base[0..8] ^ keys[0].to_le_bytes()
+        let expected: Vec<u8> = (0u8..8)
+            .zip(0x0102030405060708u64.to_le_bytes().iter())
+            .map(|(b, &k)| b ^ k)
+            .collect();
+        assert_eq!(out, expected, "xor_chunk byte 0..8 mismatch");
+    }
+
+    #[test]
+    fn xor_fill_cross_block_boundary() {
+        // Generate data that spans multiple 16 KiB blocks and verify
+        // that the result is different from a single-block fill at the same offset.
+        let base = Box::new([0xABu8; XOR_BASE_SIZE]);
+        let subxor = [1u64, 2, 3, 4];
+
+        let size = XOR_BASE_SIZE * 3 + 1000; // spans 4 blocks
+        let mut out1 = vec![0u8; size];
+        let mut out2 = vec![0u8; size];
+
+        xor_fill(&base, &subxor, 0, &mut out1);
+        xor_fill(&base, &subxor, 0, &mut out2);
+
+        assert_eq!(out1, out2, "deterministic fill must produce identical results");
+
+        // Also verify the second 16 KiB block differs from the first.
+        assert_ne!(
+            &out1[..XOR_BASE_SIZE],
+            &out1[XOR_BASE_SIZE..XOR_BASE_SIZE * 2],
+            "adjacent blocks must differ (different keys)"
+        );
     }
 }

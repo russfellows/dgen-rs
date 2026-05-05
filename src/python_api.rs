@@ -11,7 +11,7 @@ use pyo3::types::PyBytes;
 use std::cell::RefCell;
 
 use crate::constants::BLOCK_SIZE;
-use crate::generator::{generate_data, DataBuffer, DataGenerator, GeneratorConfig, NumaMode};
+use crate::generator::{generate_data, DataBuffer, DataGenerator, GenerationMethod, GeneratorConfig, NumaMode};
 use crate::rolling_pool::RollingPool;
 use crate::xor_stream::UniqueXorStream;
 
@@ -189,7 +189,7 @@ impl PyBytesView {
 /// print(f"Generated {len(data)} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
+#[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, method="parallel"))]
 fn generate_buffer(
     py: Python<'_>,
     size: usize,
@@ -198,6 +198,7 @@ fn generate_buffer(
     numa_mode: &str,
     max_threads: Option<usize>,
     numa_node: Option<usize>,
+    method: &str,
 ) -> PyResult<Py<PyBytesView>> {
     // Warn if floats are being truncated
     if dedup_ratio.fract() != 0.0 {
@@ -227,6 +228,30 @@ fn generate_buffer(
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
 
+    // Parse method
+    let gen_method = match method.to_lowercase().as_str() {
+        "parallel" => GenerationMethod::Parallel,
+        "xor" | "xorstream" | "xor_stream" => {
+            if dedup > 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "method='xor' does not support dedup_ratio > 1; use method='parallel'",
+                ));
+            }
+            if compress > 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "method='xor' does not support compress_ratio > 1; use method='parallel'",
+                ));
+            }
+            GenerationMethod::XorStream
+        }
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid method '{}': must be 'parallel' or 'xor'",
+                method
+            )))
+        }
+    };
+
     // Parse NUMA mode
     let numa = match numa_mode.to_lowercase().as_str() {
         "auto" => NumaMode::Auto,
@@ -245,7 +270,8 @@ fn generate_buffer(
     // rolling pool.  generate_data() enforces a BLOCK_SIZE minimum internally,
     // so without the pool each 64 KB call generates 1 MB and wastes 15/16 of it.
     // Config is not built on this path to avoid an unused-variable warning.
-    if size < BLOCK_SIZE && numa_node.is_none() {
+    // Only used for the Parallel method — XorStream handles any size directly.
+    if size < BLOCK_SIZE && numa_node.is_none() && gen_method == GenerationMethod::Parallel {
         let slice = PY_POOL.with(|cell| {
             let mut opt = cell.borrow_mut();
             let pool = opt.get_or_insert_with(|| RollingPool::new(dedup, compress));
@@ -260,7 +286,7 @@ fn generate_buffer(
         );
     }
 
-    // ── Standard path: full DataBuffer (large objects or NUMA pinned) ────────
+    // ── Standard path: full DataBuffer (large objects, NUMA-pinned, or XorStream) ──
     let config = GeneratorConfig {
         size,
         dedup_factor: dedup,
@@ -270,6 +296,7 @@ fn generate_buffer(
         numa_node,
         block_size: None,
         seed: None,
+        method: gen_method,
     };
 
     // Generate data WITHOUT holding GIL (allows parallel Python threads)
@@ -312,7 +339,7 @@ fn generate_buffer(
 /// print(f"Wrote {nbytes} bytes")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None))]
+#[pyo3(signature = (buffer, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, method="parallel"))]
 fn generate_into_buffer(
     py: Python<'_>,
     buffer: &Bound<'_, PyAny>,
@@ -321,6 +348,7 @@ fn generate_into_buffer(
     numa_mode: &str,
     max_threads: Option<usize>,
     numa_node: Option<usize>,
+    method: &str,
 ) -> PyResult<usize> {
     // Get buffer via PyBuffer protocol
     let buf: PyBuffer<u8> = PyBuffer::get(buffer)?;
@@ -366,6 +394,30 @@ fn generate_into_buffer(
     let dedup = (dedup_ratio.max(1.0) as usize).max(1);
     let compress = (compress_ratio.max(1.0) as usize).max(1);
 
+    // Parse method
+    let gen_method = match method.to_lowercase().as_str() {
+        "parallel" => GenerationMethod::Parallel,
+        "xor" | "xorstream" | "xor_stream" => {
+            if dedup > 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "method='xor' does not support dedup_ratio > 1; use method='parallel'",
+                ));
+            }
+            if compress > 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "method='xor' does not support compress_ratio > 1; use method='parallel'",
+                ));
+            }
+            GenerationMethod::XorStream
+        }
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid method '{}': must be 'parallel' or 'xor'",
+                method
+            )))
+        }
+    };
+
     // Parse NUMA mode
     let numa = match numa_mode.to_lowercase().as_str() {
         "auto" => NumaMode::Auto,
@@ -389,6 +441,7 @@ fn generate_into_buffer(
         numa_node, // CRITICAL: Bind to specific NUMA node if specified
         block_size: None,
         seed: None,
+        method: gen_method,
     };
 
     // Generate data
@@ -464,7 +517,7 @@ impl PyGenerator {
     /// When seed is provided, Generator produces identical data for the same configuration.
     /// This enables reproducible testing and benchmarking.
     #[new]
-    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None, seed=None))]
+    #[pyo3(signature = (size, dedup_ratio=1.0, compress_ratio=1.0, numa_mode="auto", max_threads=None, numa_node=None, chunk_size=None, block_size=None, seed=None, method="parallel"))]
     #[allow(clippy::too_many_arguments)] // PyO3 API requires all parameters as function arguments
     fn new(
         py: Python<'_>,
@@ -477,6 +530,7 @@ impl PyGenerator {
         chunk_size: Option<usize>,
         block_size: Option<usize>,
         seed: Option<u64>,
+        method: &str,
     ) -> PyResult<Self> {
         // Warn if floats are being truncated
         if dedup_ratio.fract() != 0.0 {
@@ -503,6 +557,30 @@ impl PyGenerator {
         let dedup = (dedup_ratio.max(1.0) as usize).max(1);
         let compress = (compress_ratio.max(1.0) as usize).max(1);
 
+        // Parse method
+        let gen_method = match method.to_lowercase().as_str() {
+            "parallel" => GenerationMethod::Parallel,
+            "xor" | "xorstream" | "xor_stream" => {
+                if dedup > 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "method='xor' does not support dedup_ratio > 1; use method='parallel'",
+                    ));
+                }
+                if compress > 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "method='xor' does not support compress_ratio > 1; use method='parallel'",
+                    ));
+                }
+                GenerationMethod::XorStream
+            }
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid method '{}': must be 'parallel' or 'xor'",
+                    method
+                )))
+            }
+        };
+
         // Parse NUMA mode
         let numa = match numa_mode.to_lowercase().as_str() {
             "auto" => NumaMode::Auto,
@@ -525,6 +603,7 @@ impl PyGenerator {
             numa_node,
             block_size,
             seed,
+            method: gen_method,
         };
 
         let chunk_size = chunk_size.unwrap_or_else(DataGenerator::recommended_chunk_size);

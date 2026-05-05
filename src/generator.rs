@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::constants::*;
+use crate::xor_stream::UniqueXorStream;
 
 #[cfg(feature = "numa")]
 use crate::numa::NumaTopology;
@@ -251,6 +252,25 @@ fn allocate_numa_buffer(
     Ok((topology, bytes_static, size))
 }
 
+/// Data generation algorithm
+///
+/// Controls which underlying engine generates the data.  The default (`Parallel`)
+/// is the original Rayon-based Xoshiro256++ engine that supports dedup and
+/// compression ratios.  `XorStream` is a fast, single-threaded XOR-keystream
+/// engine that guarantees uniqueness across every call but does **not** support
+/// dedup or compression factors (both must equal 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GenerationMethod {
+    /// Rayon-parallel Xoshiro256++ with controllable dedup and compression (default).
+    #[default]
+    Parallel,
+    /// Fast XOR-keystream via [`UniqueXorStream`]: dedup-safe, single-threaded.
+    ///
+    /// Requirements: `dedup_factor == 1` and `compress_factor == 1`.  Any other
+    /// values will cause a panic (Rust) or `ValueError` (Python).
+    XorStream,
+}
+
 /// NUMA optimization mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NumaMode {
@@ -286,6 +306,10 @@ pub struct GeneratorConfig {
     /// Random seed for reproducible data generation (None = use time + urandom)
     /// When set, generates identical data for the same seed value
     pub seed: Option<u64>,
+    /// Data generation algorithm (default: Parallel)
+    ///
+    /// `XorStream` requires `dedup_factor == 1` and `compress_factor == 1`.
+    pub method: GenerationMethod,
 }
 
 impl Default for GeneratorConfig {
@@ -295,10 +319,11 @@ impl Default for GeneratorConfig {
             dedup_factor: 1,
             compress_factor: 1,
             numa_mode: NumaMode::Auto,
-            max_threads: None, // Use all available cores
-            seed: None,        // Use time + urandom
-            numa_node: None,   // Use all NUMA nodes
-            block_size: None,  // Use BLOCK_SIZE constant (4 MB)
+            max_threads: None,                    // Use all available cores
+            seed: None,                            // Use time + urandom
+            numa_node: None,                       // Use all NUMA nodes
+            block_size: None,                      // Use BLOCK_SIZE constant (4 MB)
+            method: GenerationMethod::Parallel,    // Default: Rayon parallel
         }
     }
 }
@@ -328,6 +353,7 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
         numa_node: None,
         block_size: None,
         seed: None,
+        method: GenerationMethod::Parallel,
     };
     generate_data(config)
 }
@@ -352,6 +378,30 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
 ///
 /// Python accesses this memory directly via buffer protocol - ZERO COPY!
 pub fn generate_data(config: GeneratorConfig) -> DataBuffer {
+    // ── XorStream fast path ──────────────────────────────────────────────────
+    // Bypass all Rayon / dedup / compress logic.  Fill directly with XOR keystream.
+    if config.method == GenerationMethod::XorStream {
+        if config.dedup_factor > 1 {
+            panic!(
+                "GenerationMethod::XorStream does not support dedup_factor {} > 1; \
+                 use GenerationMethod::Parallel for dedup control",
+                config.dedup_factor
+            );
+        }
+        if config.compress_factor > 1 {
+            panic!(
+                "GenerationMethod::XorStream does not support compress_factor {} > 1; \
+                 use GenerationMethod::Parallel for compression control",
+                config.compress_factor
+            );
+        }
+        let stream = UniqueXorStream::new();
+        let mut buf = vec![0u8; config.size];
+        stream.fill(&mut buf);
+        return DataBuffer::Uma(buf);
+    }
+
+    // ── Parallel path (default) ───────────────────────────────────────────────
     // Validate and get effective block size (default 4 MB, max 32 MB)
     let block_size = config
         .block_size
@@ -932,11 +982,45 @@ pub struct DataGenerator {
     max_threads: usize,  // Thread count for parallel generation
     thread_pool: Option<rayon::ThreadPool>, // Reused thread pool (created once)
     block_size: usize,   // Internal parallelization block size (4-32 MB)
+    method: GenerationMethod,              // Active generation algorithm
+    xor_stream: Option<UniqueXorStream>,   // XorStream engine (Some when method == XorStream)
 }
 
 impl DataGenerator {
     /// Create new streaming generator
     pub fn new(config: GeneratorConfig) -> Self {
+        // ── XorStream path ────────────────────────────────────────────────────
+        if config.method == GenerationMethod::XorStream {
+            if config.dedup_factor > 1 {
+                panic!(
+                    "GenerationMethod::XorStream does not support dedup_factor {} > 1",
+                    config.dedup_factor
+                );
+            }
+            if config.compress_factor > 1 {
+                panic!(
+                    "GenerationMethod::XorStream does not support compress_factor {} > 1",
+                    config.compress_factor
+                );
+            }
+            return Self {
+                total_size: config.size, // No 1 MiB minimum for XorStream
+                current_pos: 0,
+                dedup_factor: 1,
+                compress_factor: 1,
+                unique_blocks: 1,
+                copy_lens: vec![],
+                call_entropy: 0,
+                block_sequence: 0,
+                max_threads: 1,
+                thread_pool: None,
+                block_size: BLOCK_SIZE,
+                method: GenerationMethod::XorStream,
+                xor_stream: Some(UniqueXorStream::new()),
+            };
+        }
+
+        // ── Parallel path (default) ───────────────────────────────────────────
         // Validate and get effective block size (default 4 MB, max 32 MB)
         let block_size = config
             .block_size
@@ -1028,6 +1112,8 @@ impl DataGenerator {
             max_threads,
             thread_pool,
             block_size,
+            method: GenerationMethod::Parallel,
+            xor_stream: None,
         }
     }
 
@@ -1049,6 +1135,20 @@ impl DataGenerator {
             tracing::trace!("fill_chunk: already complete");
             return 0;
         }
+
+        // ── XorStream dispatch ────────────────────────────────────────────────
+        if self.method == GenerationMethod::XorStream {
+            let remaining = self.total_size - self.current_pos;
+            let to_write = buf.len().min(remaining);
+            let stream = self
+                .xor_stream
+                .as_ref()
+                .expect("XorStream engine not initialised");
+            stream.fill(&mut buf[..to_write]);
+            self.current_pos += to_write;
+            return to_write;
+        }
+        // ── Parallel dispatch (default) ───────────────────────────────────────
 
         let remaining = self.total_size - self.current_pos;
         let to_write = buf.len().min(remaining);
@@ -1264,6 +1364,11 @@ impl DataGenerator {
     /// gen.fill_chunk(&mut buffer);  // Uses time+urandom
     /// ```
     pub fn set_seed(&mut self, seed: Option<u64>) {
+        // XorStream uses a counter-based scheme; seeds are not applicable.
+        if self.method == GenerationMethod::XorStream {
+            tracing::warn!("set_seed() has no effect on GenerationMethod::XorStream generators");
+            return;
+        }
         self.call_entropy = seed.unwrap_or_else(generate_call_entropy);
         // Reset block sequence counter - this ensures same seed → identical stream
         self.block_sequence = 0;
@@ -1339,6 +1444,7 @@ mod tests {
             numa_node: None,
             block_size: None,
             seed: None,
+            method: GenerationMethod::Parallel,
         };
 
         eprintln!("Config: {} blocks, {} bytes total", 5, BLOCK_SIZE * 5);
@@ -1407,6 +1513,7 @@ mod tests {
             numa_node: None,
             block_size: None,
             seed: Some(111),
+            method: GenerationMethod::Parallel,
         };
 
         // First run with seed sequence: 111 -> 222 -> 333
@@ -1458,6 +1565,7 @@ mod tests {
             numa_node: None,
             block_size: None,
             seed: Some(1111),
+            method: GenerationMethod::Parallel,
         });
 
         let mut buf = vec![0u8; chunk_size];

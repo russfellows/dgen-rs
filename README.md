@@ -10,20 +10,20 @@
 
 ## Features
 
-- **Global Thread Pool** (v0.2.4): process-global `OnceLock<ThreadPool>` shared across all callers; auto-sizes via sibling-process detection so N concurrent callers never spawn N×N OS threads
-- **Rolling Pool / BufferPool** (v0.2.3): zero-copy slices from a pre-generated 1 MB block — 16× speedup for 64 KB objects; `generate_buffer()` uses it automatically
-- **Bulk Allocation** (v0.2.0): `create_bytearrays()` is 1,280× faster than Python list comprehension for pre-generating large buffer sets
+- **Global Thread Pool** (v0.2.4): process-global `OnceLock<ThreadPool>` shared across all callers; auto-sizes via sibling-process detection so concurrent callers never spawn too many OS threads
+- **Zero-Copy Slices** (v0.2.3) Using a Rolling Pool / BufferPool: zero-copy slices from a pre-generated 1 MB block — 16× speedup for 64 KB objects; `generate_buffer()` uses it automatically
+- **Bulk Memory Allocation** (v0.2.0): `create_bytearrays()` is 1,280× faster than Python list comprehension for pre-generating large buffer sets
 - **Dynamic Reseeding** (v0.1.7): `set_seed()` resets or alternates data streams without recreating `Generator`
 - **Reproducible Seeds** (v0.1.6): `seed=` parameter for deterministic, verifiable generation across runs
 - **Controllable Data**: configurable `dedup_ratio` and `compress_ratio` — unique among Python data generators; essential for realistic storage workload simulation
 - **Streaming API**: terabytes of data with constant 32 MB memory footprint
 - **Zero-Copy**: Python buffer protocol — direct memory access, no data copying between Rust and Python
-- **NUMA-Aware**: one-process-per-node architecture with local memory allocation and core affinity
+- **NUMA-Aware**: (Only with locally built wheels) Numa one-process-per-node with numa local memory and CPU allocation and core affinity
 - **Built with Rust**: Xoshiro256++ RNG, Rayon thread-parallel generation, PyO3 bindings
 
 ---
 
-## Why dgen-py? Because it is literally up to 200X faster than NumPy.
+## Why dgen-py? Because it is literally up to 200X faster than NumPy
 
 NumPy, the most common Python data generator tops out around 2 GB/s with multiple cores. dgen-py generates at **memory-bus speed** using all cores in parallel. Tested exhaustively — all 5 NumPy bit-generators (MT19937, PCG64, PCG64DXSM, SFC64, Philox), single- and multi-threaded, with every trick a NumPy power-user would try:
 
@@ -37,9 +37,9 @@ NumPy, the most common Python data generator tops out around 2 GB/s with multipl
 
 † *Tried all 5 bit-generators and every multi-threading strategy. All single-threaded generators land at 0.45–0.57 GB/s — switching generator makes no difference. Threading tops out at ~1.4 GB/s because `rng.bytes()` always allocates a new Python object and the GIL serializes those allocations. `integers(out=...)` doesn't exist. There is no way to make NumPy faster for this task.*
 
-- **50× faster than the best NumPy**, **203× faster than `os.urandom`**
+- **50× faster than the best NumPy**, **203× faster than `os.urandom`** on a 24 vCPU VM - Up to 200x on 128+ CPU cores
 - **3,000× less memory** at scale (32 MB working set vs. 100 GB for a 100 GB dataset)
-- **Dgen-Py achieves > 300 GB/s** on large Gen5 CPU systems with 32 cores or more
+- **Dgen-Py achieves up to 300 GB/s** on large Gen5 CPU systems with 64 cores or more
 - **Only dgen-py** supports `dedup_ratio` and `compress_ratio` — `os.urandom` and NumPy always produce max-entropy data, making it unsuitable for realistic storage workload testing
 
 ---
@@ -142,7 +142,7 @@ Best for large objects and single-process bulk generation.
 ```python
 gen = dgen_py.Generator(
     size=100 * 1024**3,      # total bytes to generate
-    dedup_ratio=1.0,         # 1.0 = no dedup, 2.0 = 2:1, etc.
+    dedup_ratio=1.0,         # 1.0 = no dedup, 2.0 = 2:1, i.e. 50% of data is duplicate, etc.
     compress_ratio=1.0,      # 1.0 = incompressible, 2.0 = 2:1 compressible
     numa_mode="auto",        # auto-detect topology
     max_threads=None,        # use all available cores
@@ -190,7 +190,7 @@ while generating:
 | 16 | 52.7 GB/s | 3.3 GB/s |
 | 28 | **58.6 GB/s** | 2.1 GB/s |
 
-Aggregate throughput saturates DRAM bandwidth (~58 GB/s) at 28 processes.
+Aggregate throughput saturated VM DRAM bandwidth (~58 GB/s) at 28 processes.
 
 ### Pattern 3 — Small Objects < 1 MB: `BufferPool`
 

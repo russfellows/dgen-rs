@@ -42,6 +42,36 @@ def create_bytearrays(count: int, size: int) -> list: ...
 def bench_rolling_pool(obj_size: int, total_bytes: int) -> tuple[int, float]: ...
 
 # ---------------------------------------------------------------------------
+# Numeric distributions (docs/DESIGN_NUMERIC_DISTRIBUTIONS.md, storage#625)
+# ---------------------------------------------------------------------------
+
+def generate_uniform(
+    count: int,
+    low: float = 0.0,
+    high: float = 1.0,
+    max_threads: Optional[int] = None,
+    numa_mode: str = "auto",
+    seed: Optional[int] = None,
+) -> BytesView: ...
+
+def normalize_rows(
+    buffer: object,
+    dim: int,
+    max_threads: Optional[int] = None,
+) -> None: ...
+
+def generate_uniform_vectors(
+    rows: int,
+    dim: int,
+    low: float = 0.0,
+    high: float = 1.0,
+    normalize: bool = True,
+    max_threads: Optional[int] = None,
+    numa_mode: str = "auto",
+    seed: Optional[int] = None,
+) -> BytesView: ...
+
+# ---------------------------------------------------------------------------
 # Rolling pool (explicit, for tight loops)
 # ---------------------------------------------------------------------------
 

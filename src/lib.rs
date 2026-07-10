@@ -46,8 +46,9 @@ mod python_api;
 
 // Re-export main API
 pub use generator::{
-    generate_data, generate_data_simple, global_pool, DataBuffer, DataGenerator, GenerationMethod,
-    GeneratorConfig, NumaMode,
+    fill_uniform_f32, generate_data, generate_data_simple, generate_uniform_vectors_data,
+    global_pool, normalize_rows_f32, DataBuffer, DataGenerator, GenerationMethod, GeneratorConfig,
+    NumaMode,
 };
 
 // Re-export rolling pool (additive; does not change any existing API)

@@ -30,7 +30,7 @@ use hwlocality::{
 /// directly via raw pointers.
 #[cfg(feature = "numa")]
 pub enum DataBuffer {
-    /// UMA allocation using Vec<u8> (fast path, 43-50 GB/s)
+    /// UMA allocation using `Vec<u8>` (fast path, 43-50 GB/s)
     /// Python accesses via Vec's raw pointer
     Uma(Vec<u8>),
     /// NUMA allocation using hwlocality Bytes (target: 1,200-1,400 GB/s)
@@ -106,7 +106,7 @@ impl DataBuffer {
 
     /// Convert to bytes::Bytes for Python API (ZERO-COPY for UMA, minimal copy for NUMA)
     ///
-    /// For UMA: Uses Bytes::from(Vec<u8>) which is cheap (just wraps the allocation)
+    /// For UMA: Uses `Bytes::from(Vec<u8>)` which is cheap (just wraps the allocation)
     /// For NUMA: Must copy to bytes::Bytes since hwlocality::Bytes can't be converted directly
     ///          Alternative: Keep as DataBuffer and implement Python buffer protocol directly
     pub fn into_bytes(self) -> bytes::Bytes {
@@ -360,7 +360,7 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
 ///
 /// # Returns
 /// DataBuffer that holds the generated data without copying:
-/// - UMA: Vec<u8> wrapper
+/// - UMA: `Vec<u8>` wrapper
 /// - NUMA: hwlocality Bytes wrapper (when numa_node is specified)
 ///
 /// Python accesses this memory directly via buffer protocol - ZERO COPY!

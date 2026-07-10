@@ -32,11 +32,11 @@
 //!   across all requests on the thread, so successive calls naturally receive
 //!   distinct byte ranges.  Re-seeding only happens when the 1 MiB backing buffer
 //!   is exhausted (fresh entropy from `time + urandom`).
-//! - **Zero-copy for `size ≤ BLOCK_SIZE`**: each [`next_slice`] call returns a
+//! - **Zero-copy for `size ≤ BLOCK_SIZE`**: each [`next_slice`](crate::thread_local::next_slice) call returns a
 //!   [`bytes::Bytes`] Arc slice — no `memcpy`, no heap allocation.
 //! - **`Send`-safe with async**: the `POOL.with(...)` borrow is acquired and
 //!   released within a single synchronous expression before any `.await` point,
-//!   so futures that call [`next_slice`] are `Send` and can be spawned on a
+//!   so futures that call [`next_slice`](crate::thread_local::next_slice) are `Send` and can be spawned on a
 //!   Tokio multi-thread runtime without any unsafe code.
 //!
 //! # TODO — verify s3-ultra wires this up before tagging v0.2.4

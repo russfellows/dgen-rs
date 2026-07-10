@@ -14,7 +14,7 @@
 //! # Quick-start for async HTTP servers
 //!
 //! The easiest way to stream fake data from a GET handler is via the
-//! [`thread_local`] module.  One pool per worker thread, zero-copy for chunks
+//! [`mod@thread_local`] module.  One pool per worker thread, zero-copy for chunks
 //! ≤ 1 MiB, no re-creation, no re-seeding between requests:
 //!
 //! ```rust
@@ -34,7 +34,7 @@ pub mod rolling_pool;
 
 /// Thread-local rolling pool — zero-overhead data generation for async servers.
 ///
-/// See the [module documentation](thread_local) for full design notes.
+/// See the [module documentation](mod@thread_local) for full design notes.
 pub mod thread_local;
 
 #[cfg(feature = "numa")]

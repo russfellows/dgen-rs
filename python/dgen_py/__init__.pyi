@@ -1,4 +1,4 @@
-"""Type stubs for dgen-py v0.2.4"""
+"""Type stubs for dgen-py v0.3.0"""
 
 from typing import Optional
 

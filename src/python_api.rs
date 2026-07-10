@@ -11,7 +11,10 @@ use pyo3::types::PyBytes;
 use std::cell::RefCell;
 
 use crate::constants::BLOCK_SIZE;
-use crate::generator::{generate_data, DataBuffer, DataGenerator, GeneratorConfig, NumaMode};
+use crate::generator::{
+    fill_uniform_f32, generate_data, generate_uniform_vectors_data, normalize_rows_f32, DataBuffer,
+    DataGenerator, GeneratorConfig, NumaMode,
+};
 use crate::rolling_pool::RollingPool;
 
 #[cfg(feature = "numa")]
@@ -409,6 +412,280 @@ fn generate_into_buffer(
     }
 
     Ok(size)
+}
+
+// =============================================================================
+// Numeric distributions: generate_uniform, normalize_rows, generate_uniform_vectors
+//
+// docs/DESIGN_NUMERIC_DISTRIBUTIONS.md — added for mlcommons/storage#625.
+// Flat namespace, BytesView returns, buffer-protocol-first — consistent with
+// the rest of dgen-py rather than adopting NumPy's API shape (see design
+// doc §2/§6). `count` (not `size`) is a float32 element count, so it's
+// never confused with generate_buffer's byte-count `size`.
+// =============================================================================
+
+/// Get a writable, C-contiguous, logically-float32-or-untyped-bytes slice
+/// from `buf`. `buf` must already be validated readonly/contiguous by the
+/// caller — see [`buffer_writable_bytes`], called immediately after either
+/// a `PyBuffer<f32>` or `PyBuffer<u8>` acquisition succeeds.
+///
+/// # Safety contract
+/// The returned slice borrows the SAME memory `buf` guards; `buf` must stay
+/// alive (not be dropped) for as long as the returned slice is used —
+/// callers must keep `buf` in scope across any `py.detach()` call that uses
+/// this slice, so the buffer-export lock stays held for the whole time
+/// another thread could be writing through it.
+fn buffer_writable_bytes<T>(buf: &mut PyBuffer<T>) -> PyResult<&mut [u8]> {
+    if buf.readonly() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "buffer must be writable",
+        ));
+    }
+    if !buf.is_c_contiguous() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "buffer must be C-contiguous",
+        ));
+    }
+    let ptr = buf.buf_ptr() as *mut u8;
+    let len = buf.len_bytes();
+    // SAFETY: ptr/len come from a just-validated writable, C-contiguous
+    // Py_buffer; the borrow-checker-invisible 'static-looking lifetime here
+    // is constrained by the caller's contract (buf must outlive the slice).
+    Ok(unsafe { std::slice::from_raw_parts_mut(ptr, len) })
+}
+
+fn invalid_numa_mode_err(numa_mode: &str) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        "Invalid numa_mode '{}': must be 'auto', 'force', or 'disabled'",
+        numa_mode
+    ))
+}
+
+fn parse_numa_mode(numa_mode: &str) -> PyResult<NumaMode> {
+    match numa_mode.to_lowercase().as_str() {
+        "auto" => Ok(NumaMode::Auto),
+        "force" => Ok(NumaMode::Force),
+        "disabled" | "disable" => Ok(NumaMode::Disabled),
+        _ => Err(invalid_numa_mode_err(numa_mode)),
+    }
+}
+
+/// Generate `count` uniformly-distributed float32 values in `[low, high)`.
+///
+/// # Arguments
+/// * `count` - Number of float32 elements to generate (NOT bytes — see
+///   module note above)
+/// * `low`, `high` - Range, default `[0.0, 1.0)`
+/// * `max_threads` - Maximum threads to use (None = use all cores)
+/// * `numa_mode` - "auto" (default), "force", or "disabled"
+/// * `seed` - Random seed for reproducible output (None = time+urandom,
+///   non-deterministic — matches `Generator.set_seed(None)`)
+///
+/// # Returns
+/// Zero-copy `BytesView` — reinterpret via
+/// `np.frombuffer(view, dtype=np.float32)` (`.reshape(...)` for a specific
+/// shape).
+///
+/// # Example
+/// ```python
+/// import dgen_py
+/// import numpy as np
+///
+/// view = dgen_py.generate_uniform(1_000_000, low=0.0, high=1.0)
+/// arr = np.frombuffer(view, dtype=np.float32)
+/// ```
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (count, low=0.0, high=1.0, max_threads=None, numa_mode="auto", seed=None))]
+fn generate_uniform(
+    py: Python<'_>,
+    count: usize,
+    low: f32,
+    high: f32,
+    max_threads: Option<usize>,
+    numa_mode: &str,
+    seed: Option<u64>,
+) -> PyResult<Py<PyBytesView>> {
+    if low.is_nan() || high.is_nan() || low >= high {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "generate_uniform: low must be < high",
+        ));
+    }
+    let total_bytes = count.checked_mul(4).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("generate_uniform: count * 4 overflow")
+    })?;
+    let numa = parse_numa_mode(numa_mode)?;
+
+    let config = GeneratorConfig {
+        size: total_bytes,
+        dedup_factor: 1,
+        compress_factor: 1,
+        numa_mode: numa,
+        max_threads,
+        numa_node: None,
+        block_size: None,
+        seed,
+    };
+
+    let mut buf = vec![0u8; total_bytes];
+    py.detach(|| fill_uniform_f32(&mut buf, low, high, &config));
+
+    Py::new(
+        py,
+        PyBytesView {
+            inner: PyBytesViewInner::Owned(DataBuffer::Uma(buf)),
+        },
+    )
+}
+
+/// L2-normalize each row of a `(rows, dim)` float32 buffer, in place.
+///
+/// # Arguments
+/// * `buffer` - A writable, C-contiguous buffer: a `bytearray`/`memoryview`
+///   of raw bytes (e.g. `generate_uniform()`'s own output, wrapped in
+///   `bytearray()`), or a NumPy `float32` array. Any other typed buffer
+///   (e.g. `float64`) is rejected with `ValueError`, not silently
+///   reinterpreted.
+/// * `dim` - Row width in float32 elements. `buffer`'s byte length must be
+///   an exact multiple of `dim * 4`.
+/// * `max_threads` - Maximum threads to use (None = use all cores)
+///
+/// L2-only in v1 (see docs/DESIGN_NUMERIC_DISTRIBUTIONS.md §5) — a zero row
+/// is left unchanged (dividing by a zero norm would produce NaN) rather
+/// than raising.
+///
+/// # Example
+/// ```python
+/// import dgen_py
+///
+/// buf = bytearray(dgen_py.generate_uniform(1000 * 128))
+/// dgen_py.normalize_rows(buf, dim=128)
+/// ```
+#[pyfunction]
+#[pyo3(signature = (buffer, dim, max_threads=None))]
+fn normalize_rows(
+    py: Python<'_>,
+    buffer: &Bound<'_, PyAny>,
+    dim: usize,
+    max_threads: Option<usize>,
+) -> PyResult<()> {
+    if dim == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "normalize_rows: dim must be > 0",
+        ));
+    }
+    let row_bytes = dim.checked_mul(4).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("normalize_rows: dim * 4 overflow")
+    })?;
+
+    // Try float32-typed buffer first (e.g. a NumPy float32 array), then
+    // fall back to an untyped raw-byte buffer (bytearray, memoryview,
+    // dgen-py's own BytesView-wrapped-in-bytearray). Anything else (e.g. a
+    // float64 array) fails BOTH attempts and hits the final Err below —
+    // never silently byte-reinterpreted.
+    if let Ok(mut buf) = PyBuffer::<f32>::get(buffer) {
+        let slice = buffer_writable_bytes(&mut buf)?;
+        if slice.len() % row_bytes != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "normalize_rows: buffer length must be a multiple of dim * 4",
+            ));
+        }
+        py.detach(|| normalize_rows_f32(slice, dim, max_threads));
+        return Ok(());
+    }
+    if let Ok(mut buf) = PyBuffer::<u8>::get(buffer) {
+        let slice = buffer_writable_bytes(&mut buf)?;
+        if slice.len() % row_bytes != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "normalize_rows: buffer length must be a multiple of dim * 4",
+            ));
+        }
+        py.detach(|| normalize_rows_f32(slice, dim, max_threads));
+        return Ok(());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        "normalize_rows: buffer must be a writable float32 array or a raw byte buffer \
+         (e.g. bytearray) — other typed buffers (e.g. float64) are rejected",
+    ))
+}
+
+/// Generate `rows` vectors of `dim` uniformly-distributed float32 elements
+/// in `[low, high)`, optionally L2-normalized, in ONE call.
+///
+/// Equivalent to `generate_uniform(rows*dim, low, high).reshape(rows,
+/// dim)` followed by `normalize_rows(..., dim)` if `normalize=True` — but
+/// fused: no Python round-trip between generation and normalization.
+///
+/// # Arguments
+/// * `rows`, `dim` - Output shape
+/// * `low`, `high` - Range, default `[0.0, 1.0)`
+/// * `normalize` - L2-normalize each row (default `True`). `False` skips
+///   normalization entirely (pure batched `generate_uniform` reshaped to
+///   `(rows, dim)`).
+/// * `max_threads` - Maximum threads to use (None = use all cores)
+/// * `numa_mode` - "auto" (default), "force", or "disabled"
+/// * `seed` - Random seed for reproducible output (None = time+urandom)
+///
+/// # Returns
+/// Zero-copy `BytesView` — reinterpret via
+/// `np.frombuffer(view, dtype=np.float32).reshape(rows, dim)`.
+///
+/// This is the function VDB-style callers should use in production — see
+/// `mlp-storage/vdb_benchmark/vdbbench/load_vdb.py::generate_vectors()`
+/// for the motivating call site (mlcommons/storage#625).
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (rows, dim, low=0.0, high=1.0, normalize=true, max_threads=None, numa_mode="auto", seed=None))]
+fn generate_uniform_vectors(
+    py: Python<'_>,
+    rows: usize,
+    dim: usize,
+    low: f32,
+    high: f32,
+    normalize: bool,
+    max_threads: Option<usize>,
+    numa_mode: &str,
+    seed: Option<u64>,
+) -> PyResult<Py<PyBytesView>> {
+    if low.is_nan() || high.is_nan() || low >= high {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "generate_uniform_vectors: low must be < high",
+        ));
+    }
+    if dim == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "generate_uniform_vectors: dim must be > 0",
+        ));
+    }
+    rows.checked_mul(dim)
+        .and_then(|e| e.checked_mul(4))
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "generate_uniform_vectors: rows * dim * 4 overflow",
+            )
+        })?;
+    let numa = parse_numa_mode(numa_mode)?;
+
+    let config = GeneratorConfig {
+        size: 0, // unused directly; rows*dim*4 drives allocation inside generate_uniform_vectors_data
+        dedup_factor: 1,
+        compress_factor: 1,
+        numa_mode: numa,
+        max_threads,
+        numa_node: None,
+        block_size: None,
+        seed,
+    };
+
+    let data =
+        py.detach(|| generate_uniform_vectors_data(rows, dim, low, high, normalize, &config));
+
+    Py::new(
+        py,
+        PyBytesView {
+            inner: PyBytesViewInner::Owned(data),
+        },
+    )
 }
 
 // =============================================================================
@@ -960,6 +1237,11 @@ pub fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Simple API
     m.add_function(wrap_pyfunction!(generate_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(generate_into_buffer, m)?)?;
+
+    // Numeric distributions (docs/DESIGN_NUMERIC_DISTRIBUTIONS.md, storage#625)
+    m.add_function(wrap_pyfunction!(generate_uniform, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_uniform_vectors, m)?)?;
 
     // Rolling pool explicit API
     m.add_class::<PyBufferPool>()?;

@@ -2,6 +2,106 @@
 
 All notable changes to dgen-rs/dgen-py will be documented in this file.
 
+## [0.3.0] - 2026-07-10
+
+### Added
+
+#### Numeric distributions: `generate_uniform`, `normalize_rows`, `generate_uniform_vectors`
+
+Three new functions (see `docs/DESIGN_NUMERIC_DISTRIBUTIONS.md` for the full
+design writeup), driven by a real-world case: mlcommons/storage's
+VectorDB benchmark generates its vectors with pure NumPy today because
+dgen-py's existing API (`generate_buffer`/`Generator.get_chunk`) returns
+raw random **bytes**, not floats with a defined distribution. Naively
+reinterpreting those bytes as `float32` is invalid — roughly 0.38% of
+individual float32 values come out NaN, and finite values span the full
+float32 dynamic range instead of a bounded range. For a 128-dim vector
+that NaN rate means ~38% of vectors would come out entirely NaN after
+L2-normalization.
+
+An initial pure-Python workaround (bit-mask raw bytes into valid `[0,1)`
+floats, then `np.linalg.norm` + divide) proved the underlying dgen-py
+generation engine is already ~80x faster than NumPy at raw generation —
+but the single-threaded Python-side conversion erased nearly all of that
+advantage (9.65s total vs NumPy's 21.35s at the benchmark's production
+chunk size — only ~2.2x end-to-end despite an 80x raw-generation edge).
+
+**Fix**: move the bit-mask conversion and L2-normalization into Rust,
+reusing the existing `par_chunks_mut` block-parallel engine, so both
+scale with thread count the same way raw generation already does.
+
+- `generate_uniform(count, low=0.0, high=1.0, max_threads=None,
+  numa_mode="auto", seed=None) -> BytesView` — general-purpose parallel
+  uniform float32 generation. IEEE-754 bit-masking of the existing
+  Xoshiro256++ random byte stream (mask to the 23 mantissa bits, force
+  the exponent into `[1.0, 2.0)`, subtract 1.0, scale/shift by
+  `high - low` and `low`) — uses 100% of the generated random bits, no
+  entropy loss, no rejection sampling. `count` is a float32 *element*
+  count, deliberately not named `size`, so it's never confused with
+  `generate_buffer`'s byte-count `size`.
+- `normalize_rows(buffer, dim, max_threads=None) -> None` —
+  general-purpose in-place L2 row normalization of any writable,
+  C-contiguous buffer: a raw byte buffer (`bytearray`, `memoryview`,
+  dgen-py's own `BytesView`) or a NumPy `float32` array. Other typed
+  buffers (e.g. `float64`) are rejected with `ValueError`, never silently
+  byte-reinterpreted. A zero row is left unchanged (dividing by a zero
+  norm would produce NaN) rather than raising. L2-only in v1 — no `norm`
+  mode parameter.
+- `generate_uniform_vectors(rows, dim, low=0.0, high=1.0,
+  normalize=True, max_threads=None, numa_mode="auto", seed=None) ->
+  BytesView` — fused generate+normalize in one Rust call, the VDB
+  production fast-path. Byte-for-byte equivalent to calling
+  `generate_uniform` + `normalize_rows` separately with the same seed
+  (verified in tests), but with no Python round-trip between the two
+  steps.
+
+All three return `BytesView` (never a NumPy array) and use a flat
+namespace (`dgen_py.generate_uniform`, not a `dgen_py.random`
+submodule) — consistent with every existing dgen-py function rather
+than adopting NumPy's API shape.
+
+**Live scaling verification** (real calls against the actual VDB
+production shapes, not synthetic microbenchmarks):
+
+Thread-count sweep, `generate_uniform_vectors` at 1,000,000 × 1536
+(6.14 GB) — smooth, continuous scaling, true per-call thread control
+(unlike the existing streaming `Generator` API, which only gates
+sequential-vs-parallel rather than sizing a pool per call):
+
+| Threads | Throughput |
+|:-------:|:----------:|
+| 1  | 0.69 GB/s |
+| 2  | 1.32 GB/s |
+| 4  | 2.46 GB/s |
+| 8  | 4.47 GB/s |
+| 16 | 6.56 GB/s |
+| 28 | 7.63 GB/s |
+
+End-to-end speedup vs. the real NumPy `generate_vectors()` contract,
+across all VDB production configs — grows *with* scale:
+
+| Config | Speedup |
+|:------:|:-------:|
+| 10,000 × 512    | 14.65x |
+| 10,000 × 1536   | 18.69x |
+| 100,000 × 512   | 20.37x |
+| 100,000 × 1536  | 21.72x |
+| 1,000,000 × 512  | 25.38x |
+| 1,000,000 × 1536 | 27.79x |
+
+Tests: 10 new Rust tests (`tests/test_numeric_distributions.rs`) + 12 new
+Python tests (`tests/test_numeric_distributions_py.py`), both confirmed
+RED against unmodified code before implementation (Rust: compile
+failure; Python: `AttributeError`), GREEN after. Full existing suite
+unchanged (25 lib unit tests + 28 existing integration tests + 8
+doctests). `cargo clippy --all-targets --all-features -D warnings` and
+`cargo fmt --check` both clean.
+
+### Changed
+
+- `cargo update` — all dependencies bumped to latest semver-compatible
+  versions; full test/clippy/fmt suite re-verified clean afterward.
+
 ## [0.2.4] - 2026-05-04
 
 ### Added

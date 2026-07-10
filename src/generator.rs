@@ -30,7 +30,7 @@ use hwlocality::{
 /// directly via raw pointers.
 #[cfg(feature = "numa")]
 pub enum DataBuffer {
-    /// UMA allocation using Vec<u8> (fast path, 43-50 GB/s)
+    /// UMA allocation using `Vec<u8>` (fast path, 43-50 GB/s)
     /// Python accesses via Vec's raw pointer
     Uma(Vec<u8>),
     /// NUMA allocation using hwlocality Bytes (target: 1,200-1,400 GB/s)
@@ -106,7 +106,7 @@ impl DataBuffer {
 
     /// Convert to bytes::Bytes for Python API (ZERO-COPY for UMA, minimal copy for NUMA)
     ///
-    /// For UMA: Uses Bytes::from(Vec<u8>) which is cheap (just wraps the allocation)
+    /// For UMA: Uses `Bytes::from(Vec<u8>)` which is cheap (just wraps the allocation)
     /// For NUMA: Must copy to bytes::Bytes since hwlocality::Bytes can't be converted directly
     ///          Alternative: Keep as DataBuffer and implement Python buffer protocol directly
     pub fn into_bytes(self) -> bytes::Bytes {
@@ -360,7 +360,7 @@ pub fn generate_data_simple(size: usize, dedup: usize, compress: usize) -> DataB
 ///
 /// # Returns
 /// DataBuffer that holds the generated data without copying:
-/// - UMA: Vec<u8> wrapper
+/// - UMA: `Vec<u8>` wrapper
 /// - NUMA: hwlocality Bytes wrapper (when numa_node is specified)
 ///
 /// Python accesses this memory directly via buffer protocol - ZERO COPY!
@@ -813,6 +813,174 @@ fn generate_call_entropy() -> u64 {
     };
 
     time_entropy.wrapping_add(urandom_entropy)
+}
+
+// =============================================================================
+// Numeric distributions: uniform float32 generation + row normalization
+//
+// docs/DESIGN_NUMERIC_DISTRIBUTIONS.md — added for mlcommons/storage#625.
+// These reuse the existing block-parallel Xoshiro256++ engine (fill_block)
+// for the underlying random bits, with dedup/compress always off (copy_len=0
+// always -- those parameters have no meaning for a numeric distribution).
+// =============================================================================
+
+/// Run `f` in parallel over `buf`'s `chunk_size`-sized chunks (enumerated).
+///
+/// Honors `max_threads` by building a scoped thread pool only when the
+/// caller explicitly requests a specific thread count; `None` uses rayon's
+/// ambient/global pool directly with no per-call pool allocation, matching
+/// generate_data()'s existing non-NUMA batch-path convention.
+fn with_parallel_chunks_mut<F>(buf: &mut [u8], chunk_size: usize, max_threads: Option<usize>, f: F)
+where
+    F: Fn(usize, &mut [u8]) + Sync,
+{
+    if let Some(n) = max_threads {
+        if n > 0 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .expect("failed to build thread pool for numeric-distribution call");
+            pool.install(|| {
+                buf.par_chunks_mut(chunk_size)
+                    .enumerate()
+                    .for_each(|(i, c)| f(i, c));
+            });
+            return;
+        }
+    }
+    buf.par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(i, c)| f(i, c));
+}
+
+/// Fill `buf` (must be a multiple of 4 bytes) with uniformly-distributed
+/// float32 values in `[low, high)`.
+///
+/// Two parallel passes over `buf`:
+///   1. Raw-entropy fill using the existing block-parallel engine
+///      (`fill_block`, `copy_len=0` — no dedup/compress).
+///   2. IEEE-754 bit-mask conversion: mask each 4-byte group to its 23
+///      mantissa bits, OR in the exponent bits for `[1.0, 2.0)`, subtract
+///      1.0 for `[0.0, 1.0)`, then scale/shift by `(high - low)` and `low`.
+///      Uses 100% of the generated random bits — no entropy loss, no
+///      rejection sampling.
+///
+/// # Panics
+/// Panics if `buf.len()` is not a multiple of 4, or if `low >= high`.
+pub fn fill_uniform_f32(buf: &mut [u8], low: f32, high: f32, config: &GeneratorConfig) {
+    assert_eq!(
+        buf.len() % 4,
+        0,
+        "fill_uniform_f32: buffer length must be a multiple of 4 (float32)"
+    );
+    assert!(low < high, "fill_uniform_f32: low must be < high");
+
+    let call_entropy = config.seed.unwrap_or_else(generate_call_entropy);
+    let block_size = config.block_size.unwrap_or(BLOCK_SIZE).max(4);
+    let scale = high - low;
+
+    let run = |buf: &mut [u8]| {
+        // Pass 1: raw entropy, reusing the existing engine.
+        buf.par_chunks_mut(block_size)
+            .enumerate()
+            .for_each(|(i, chunk)| fill_block(chunk, 0, 0, i as u64, call_entropy));
+
+        // Pass 2: bit-mask conversion to uniform [low, high). Byte-array
+        // (from_ne_bytes/to_ne_bytes) round-trip, not raw pointer casts —
+        // avoids any alignment assumptions about the caller-provided buffer.
+        buf.par_chunks_mut(4).for_each(|quad| {
+            let bits = u32::from_ne_bytes([quad[0], quad[1], quad[2], quad[3]]);
+            let masked = (bits & 0x007F_FFFF) | 0x3F80_0000;
+            let unit = f32::from_bits(masked) - 1.0; // [0.0, 1.0)
+            let value = unit * scale + low;
+            quad.copy_from_slice(&value.to_ne_bytes());
+        });
+    };
+
+    if let Some(n) = config.max_threads {
+        if n > 0 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .expect("failed to build thread pool for fill_uniform_f32");
+            pool.install(|| run(buf));
+            return;
+        }
+    }
+    run(buf);
+}
+
+/// L2-normalize each `dim`-float32-wide row of `buf`, in place.
+///
+/// `buf.len()` must be an exact multiple of `dim * 4` (a whole number of
+/// rows). Rows are processed independently and in parallel
+/// (`par_chunks_mut` over `dim*4`-byte row chunks). A zero row (L2 norm of
+/// exactly 0.0) is left unchanged rather than divided (which would produce
+/// NaN) — matching the convention used by similar libraries (e.g.
+/// scikit-learn's `normalize`).
+///
+/// # Panics
+/// Panics if `dim == 0` or `buf.len()` is not a multiple of `dim * 4`.
+pub fn normalize_rows_f32(buf: &mut [u8], dim: usize, max_threads: Option<usize>) {
+    assert!(dim > 0, "normalize_rows_f32: dim must be > 0");
+    let row_bytes = dim
+        .checked_mul(4)
+        .expect("normalize_rows_f32: dim * 4 overflow");
+    assert_eq!(
+        buf.len() % row_bytes,
+        0,
+        "normalize_rows_f32: buffer length must be a multiple of dim * 4"
+    );
+
+    let run = |row: &mut [u8]| {
+        let mut sum_sq = 0f32;
+        for quad in row.chunks_exact(4) {
+            let v = f32::from_ne_bytes([quad[0], quad[1], quad[2], quad[3]]);
+            sum_sq += v * v;
+        }
+        if sum_sq > 0.0 {
+            let norm = sum_sq.sqrt();
+            for quad in row.chunks_exact_mut(4) {
+                let v = f32::from_ne_bytes([quad[0], quad[1], quad[2], quad[3]]);
+                let normalized = v / norm;
+                quad.copy_from_slice(&normalized.to_ne_bytes());
+            }
+        }
+        // else: zero row -- left unchanged (norm=0 would divide by zero).
+    };
+
+    with_parallel_chunks_mut(buf, row_bytes, max_threads, |_i, row| run(row));
+}
+
+/// Fused generate + optional normalize — single buffer, avoids the
+/// Python-visible round-trip and extra full-buffer pass that calling
+/// [`fill_uniform_f32`] + [`normalize_rows_f32`] separately from Python
+/// would incur.
+///
+/// # Panics
+/// Panics if `dim == 0`, `low >= high`, or `rows * dim * 4` overflows.
+pub fn generate_uniform_vectors_data(
+    rows: usize,
+    dim: usize,
+    low: f32,
+    high: f32,
+    normalize: bool,
+    config: &GeneratorConfig,
+) -> DataBuffer {
+    assert!(dim > 0, "generate_uniform_vectors_data: dim must be > 0");
+    let total_elems = rows
+        .checked_mul(dim)
+        .expect("generate_uniform_vectors_data: rows * dim overflow");
+    let total_bytes = total_elems
+        .checked_mul(4)
+        .expect("generate_uniform_vectors_data: rows * dim * 4 overflow");
+
+    let mut data = DataBuffer::Uma(vec![0u8; total_bytes]);
+    fill_uniform_f32(data.as_mut_slice(), low, high, config);
+    if normalize {
+        normalize_rows_f32(data.as_mut_slice(), dim, config.max_threads);
+    }
+    data
 }
 
 #[cfg(all(feature = "numa", feature = "thread-pinning"))]

@@ -2,14 +2,15 @@
 
 **The world's fastest Python random data generator — NUMA-aware, zero-copy, with configurable deduplication and compression ratios**
 
-[![Version](https://img.shields.io/badge/version-0.2.4-blue)](https://pypi.org/project/dgen-py/)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue)](https://pypi.org/project/dgen-py/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/dgen-py)](https://pypi.org/project/dgen-py/)
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
-[![Tests](https://img.shields.io/badge/tests-69%20passing-success)](https://github.com/russfellows/dgen-rs)
+[![Tests](https://img.shields.io/badge/tests-63%20passing-success)](https://github.com/russfellows/dgen-rs)
 
 ## Features
 
+- **Numeric Distributions** (v0.3.0): `generate_uniform()`, `normalize_rows()`, `generate_uniform_vectors()` — parallel uniform float32 generation and L2 row normalization in Rust, up to **28× faster end-to-end** than NumPy for ML/vector-database workloads (embeddings, ANN indexes)
 - **Global Thread Pool** (v0.2.4): process-global `OnceLock<ThreadPool>` shared across all callers; auto-sizes via sibling-process detection so concurrent callers never spawn too many OS threads
 - **Zero-Copy Slices** (v0.2.3) Using a Rolling Pool / BufferPool: zero-copy slices from a pre-generated 1 MB block — 16× speedup for 64 KB objects; `generate_buffer()` uses it automatically
 - **Bulk Memory Allocation** (v0.2.0): `create_bytearrays()` is 1,280× faster than Python list comprehension for pre-generating large buffer sets
@@ -71,10 +72,11 @@ pip install --no-binary dgen-py dgen-py \
 
 ## Quick Start
 
-Four patterns cover the most common use cases:
+Five patterns cover the most common use cases:
 
 ```python
 import dgen_py
+import numpy as np
 
 # ── 1. Streaming ────────────────────────────────────────────────────────────
 # Generates any amount of data with constant 32 MB memory, all cores used.
@@ -123,6 +125,12 @@ gen.set_seed(99)           # switch to a different stream
 gen.fill_chunk(buf)        # stream B
 gen.set_seed(42)           # rewind back to the beginning of stream A
 gen.fill_chunk(buf)        # identical bytes to the very first fill_chunk above
+
+# ── 5. Numeric distributions (ML / vector-database data) ───────────────────
+# Actual float32 values with a defined distribution, not raw bytes.
+# Up to 28x faster end-to-end than NumPy — see Pattern 4 below for details.
+view = dgen_py.generate_uniform_vectors(rows=1_000_000, dim=1536)
+vectors = np.frombuffer(view, dtype=np.float32).reshape(1_000_000, 1536)
 ```
 
 See [API Usage](#api-usage) below for detailed options on each pattern.
@@ -228,6 +236,86 @@ print(pool.compress_ratio)  # current compress factor
 | New code, tight loop, many small objects | `BufferPool` — explicit, identical performance |
 | Objects ≥ 1 MB | Either — both use the same large-object bypass path |
 | NUMA-pinned workloads | `generate_buffer(..., numa_node=N)` — pool bypassed per design |
+
+### Pattern 4 — Numeric Distributions: ML / vector-database data (v0.3.0)
+
+For workloads that need actual **floating-point values with a defined
+distribution** — not raw bytes — rather than NumPy. Built for cases like
+vector-database benchmarks (embeddings) and other ML data-generation
+paths where the existing byte-oriented API (`generate_buffer`,
+`Generator`) isn't a valid substitute: naively reinterpreting random
+bytes as `float32` produces NaN/Inf and unbounded values.
+
+```python
+import dgen_py
+import numpy as np
+
+# ── Uniform float32 generation ──────────────────────────────────────────────
+# count is an ELEMENT count (not bytes) — deliberately distinct from
+# generate_buffer's byte-count `size`.
+view = dgen_py.generate_uniform(1_000_000, low=0.0, high=1.0)
+arr = np.frombuffer(view, dtype=np.float32)          # zero-copy, flat array
+
+# ── L2-normalize an existing float32 buffer, in place ───────────────────────
+buf = bytearray(dgen_py.generate_uniform(1_000 * 128))
+dgen_py.normalize_rows(buf, dim=128)                  # every row -> unit L2 norm
+mat = np.frombuffer(buf, dtype=np.float32).reshape(1_000, 128)
+
+# ── Fused generate + normalize — the fast path for vector data ─────────────
+# One Rust call: no Python round-trip between generation and normalization.
+view = dgen_py.generate_uniform_vectors(rows=1_000_000, dim=1536)
+vectors = np.frombuffer(view, dtype=np.float32).reshape(1_000_000, 1536)
+```
+
+**Why this exists:** an initial pure-Python workaround (bit-mask raw
+bytes into valid floats, then `np.linalg.norm` + divide) proved dgen-py's
+generation engine is ~80× faster than NumPy at raw generation — but the
+single-threaded Python-side conversion erased nearly all of that
+advantage. Moving the bit-mask conversion and L2-normalization into Rust
+(reusing the same `par_chunks_mut` engine as the rest of dgen-py) restores
+real multi-core scaling to the whole pipeline, not just the raw-byte step.
+
+**Real-world speedup vs. NumPy** (`np.random.random((n,dim)).astype(np.float32)`
++ `np.linalg.norm` + divide — the exact contract this replaces), measured
+against a real vector-database benchmark's production configurations,
+28-core Xeon:
+
+| Shape (rows × dim) | NumPy | `generate_uniform_vectors` | Speedup |
+|:---:|:---:|:---:|:---:|
+| 10,000 × 512      | 65.7 ms   | 4.5 ms   | **14.7×** |
+| 10,000 × 1,536    | 207.1 ms  | 11.1 ms  | **18.7×** |
+| 100,000 × 512     | 712.6 ms  | 35.0 ms  | **20.4×** |
+| 100,000 × 1,536   | 2147.0 ms | 98.8 ms  | **21.7×** |
+| 1,000,000 × 512   | 7133.5 ms | 281.1 ms | **25.4×** |
+| 1,000,000 × 1,536 | 20986.9 ms| 755.3 ms | **27.8×** |
+
+Speedup grows with scale — the two largest, most production-representative
+shapes hit 25–28×. `generate_uniform_vectors` also has genuine per-call
+thread-count control via `max_threads=`, unlike the streaming `Generator`
+API's coarser sequential-vs-parallel gate:
+
+| Threads | Throughput (1M × 1536 vectors) |
+|:-------:|:-------------------------------:|
+| 1  | 0.69 GB/s |
+| 2  | 1.32 GB/s |
+| 4  | 2.46 GB/s |
+| 8  | 4.47 GB/s |
+| 16 | 6.56 GB/s |
+| 28 | 7.63 GB/s |
+
+**Design notes:**
+- All three functions return `BytesView` (never a NumPy array) and use a
+  flat namespace — consistent with the rest of dgen-py rather than
+  adopting NumPy's API shape. See
+  [`docs/DESIGN_NUMERIC_DISTRIBUTIONS.md`](docs/DESIGN_NUMERIC_DISTRIBUTIONS.md)
+  for the full design writeup and rationale.
+- `normalize_rows()` is L2-only in v1, accepts any writable, C-contiguous
+  `float32` NumPy array or raw-byte buffer (`bytearray`, `memoryview`,
+  dgen-py's own `BytesView`) — other typed buffers (e.g. `float64`) are
+  rejected with `ValueError`, never silently byte-reinterpreted. A
+  zero-norm row is left unchanged rather than turned into NaN.
+- `generate_uniform_vectors(..., normalize=False)` skips normalization
+  entirely when you just want raw uniform-distributed vectors.
 
 ### Bulk Pre-Allocation: `create_bytearrays` (v0.2.0)
 
@@ -424,6 +512,8 @@ Zero regression for objects ≥ 1 MB; large-object bypass path is unaffected.
 | [`test_seed_reproducibility.py`](python/examples/test_seed_reproducibility.py) | Test | `seed=` determinism across runs |
 | [`benchmark_numa_multiprocess_v2.py`](python/examples/benchmark_numa_multiprocess_v2.py) | Multi-NUMA | One-process-per-node architecture with `os.sched_setaffinity()` |
 | [`storage_benchmark.py`](python/examples/storage_benchmark.py) | Storage | End-to-end: generation → file / S3 write |
+| [`numeric_distributions_demo.py`](python/examples/numeric_distributions_demo.py) | Demo + Bench | `generate_uniform`, `normalize_rows`, `generate_uniform_vectors` — usage + speedup vs NumPy |
+| [`test_chunk_sizes.py`](python/examples/test_chunk_sizes.py) | Benchmark | `Generator` streaming throughput across chunk sizes (4-128 MB) |
 
 ---
 
